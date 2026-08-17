@@ -1,5 +1,9 @@
 HELP.md
 target/
+
+### Secrets ###
+src/main/resources/secret.properties
+wechat-login.json
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/
 !**/src/test/**/target/

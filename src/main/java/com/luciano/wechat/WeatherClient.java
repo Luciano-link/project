@@ -79,6 +79,28 @@ public class WeatherClient {
     }
 
     /**
+     * 查询城市明天的天气,返回简短中文句子。
+     */
+    public String getTomorrow(String city) throws Exception {
+        String locationId = resolveLocationId(city);
+        JsonNode resp = getJson("/v7/weather/3d", locationId);
+        JsonNode daily = resp.path("daily");
+        if (!daily.isArray() || daily.size() < 2) {
+            throw new IllegalStateException("未找到预报数据: " + resp);
+        }
+        JsonNode day = daily.get(1);
+        String date = day.path("fxDate").asText("");
+        String textDay = day.path("textDay").asText("--");
+        String textNight = day.path("textNight").asText("--");
+        String tempMin = day.path("tempMin").asText("--");
+        String tempMax = day.path("tempMax").asText("--");
+        String windDir = day.path("windDirDay").asText("--");
+        String windScale = day.path("windScaleDay").asText("--");
+        return String.format("%s明天(%s):%s转%s,%s~%s℃,%s%s级。",
+                city, date, textDay, textNight, tempMin, tempMax, windDir, windScale);
+    }
+
+    /**
      * 用城市名查 LocationID(取第一个匹配结果)。
      */
     private String resolveLocationId(String city) throws Exception {

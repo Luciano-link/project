@@ -10,6 +10,7 @@
 - **图片生成** — 发送「画一张 xx」自动生成图片(qwen-image-plus)
 - **实时天气** — 发送「北京天气」查询实时天气 + 3 天预报(和风天气)
 - **语音识别** — 收到语音消息后读取转写文字并回复
+- **对话记忆** — 按用户记住最近 20 条对话,重启后保留,支持多轮上下文
 - **REST 调试接口** — 二维码、登录状态、收发消息
 
 ## 技术栈
@@ -29,6 +30,7 @@
                             ├── DashScopeClient  通义千问(对话/看图/画图)
                             ├── WeatherClient    和风天气(实时/预报)
                             ├── LoginStateStore  登录态持久化
+                            ├── MemoryStore      对话记忆持久化
                             └── WechatController REST 接口
 ```
 
@@ -96,6 +98,7 @@ src/main/java/com/luciano/wechat/
 ├── WechatBotService.java   核心服务(登录、轮询、消息分发、自动回复)
 ├── DashScopeClient.java    通义千问封装(对话/看图/画图)
 ├── WeatherClient.java      和风天气封装(实时/预报)
+├── MemoryStore.java        对话记忆持久化(按用户,最近 20 条)
 ├── WechatController.java   REST 接口
 └── LoginStateStore.java    登录态持久化
 src/main/resources/
@@ -105,7 +108,7 @@ src/main/resources/
 
 ## 注意事项
 
-- **API Key 与登录态不入库**:`secret.properties` 和 `wechat-login.json` 均已加入 `.gitignore`,请勿强制提交。
+- **API Key 与登录态不入库**:`secret.properties`、`wechat-login.json`、`wechat-memory.json` 均已加入 `.gitignore`,请勿强制提交。
 - **不能主动发起对话**:iLink 协议限制,机器人需用户先发消息才能回复。
 - **连接有效期**:iLink 连接约 24 小时,可能需重新登录。
 - 通义千问、和风天气均有免费额度限制,请勿高频调用。

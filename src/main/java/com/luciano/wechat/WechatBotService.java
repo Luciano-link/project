@@ -12,6 +12,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -34,8 +35,14 @@ public class WechatBotService {
     private final LoginStateStore loginStateStore;
     private final DashScopeClient dashScopeClient;
     private final WeatherClient weatherClient;
+    private final MemoryStore memoryStore;
 
-    private ILinkClient client;
+    /** 微信 iLink 客户端,登录成功后持有连接。 */
+    private volatile ILinkClient client;
+
+    /** 天气查询的默认城市(消息里没提到城市时使用)。 */
+    @Value("${weather.default-city:南京}")
+    private String defaultCity;
 
     /** 当前二维码图片内容,登录后清空。 */
     private volatile String qrcodeImgContent;
@@ -50,10 +57,11 @@ public class WechatBotService {
 
     private final AtomicBoolean loginTriggered = new AtomicBoolean(false);
 
-    public WechatBotService(LoginStateStore loginStateStore, DashScopeClient dashScopeClient, WeatherClient weatherClient) {
+    public WechatBotService(LoginStateStore loginStateStore, DashScopeClient dashScopeClient, WeatherClient weatherClient, MemoryStore memoryStore) {
         this.loginStateStore = loginStateStore;
         this.dashScopeClient = dashScopeClient;
         this.weatherClient = weatherClient;
+        this.memoryStore = memoryStore;
     }
 
     @PostConstruct
@@ -199,11 +207,14 @@ public class WechatBotService {
                         client.sendText(fromUserId, "正在生成图片,请稍候...");
                         byte[] imageBytes = dashScopeClient.generateImage(text);
                         client.sendImage(fromUserId, imageBytes, "generated.png", "图片");
-                    } else if (isWeatherRequest(text)) {
-                        handleWeather(fromUserId, text);
                     } else {
-                        String reply = dashScopeClient.chat(text, List.of());
-                        client.sendText(fromUserId, reply);
+                        WeatherIntent intent = analyzeWeatherIntent(text);
+                        if (intent.isWeather()) {
+                            handleWeather(fromUserId, intent.city(), intent.time());
+                        } else {
+                            String reply = chatWithMemory(fromUserId, text);
+                            client.sendText(fromUserId, reply);
+                        }
                     }
                     return;
                 }
@@ -230,34 +241,56 @@ public class WechatBotService {
     }
 
     /**
-     * 判断文本是否是「天气」请求。
+     * 天气查询意图:由 LLM 判断是否问天气,并提取城市与时间意图。
      */
-    private boolean isWeatherRequest(String text) {
-        return text != null && text.contains("天气");
+    private record WeatherIntent(boolean isWeather, String city, String time) {
     }
 
     /**
-     * 处理天气查询:从消息中提取城市,查实时天气 + 3 天预报并回复。
+     * 用 LLM 判断消息是否在询问天气,并提取城市与时间意图。
      */
-    private void handleWeather(String fromUserId, String text) throws Exception {
-        String city = extractCity(text);
-        if (city == null || city.isBlank()) {
-            client.sendText(fromUserId, "请告诉我想查哪个城市,例如:北京天气");
-            return;
+    private WeatherIntent analyzeWeatherIntent(String text) throws Exception {
+        String prompt = "判断下面这条用户消息是否在询问天气(包括温度、下雨、下雪、冷热、穿衣、带伞、预报等)。"
+                + "如果在问天气,只返回一行:是|城市名|时间,其中时间取「现在/今天/明天/几天」之一,没有城市就留空;"
+                + "如果不是问天气,只返回:否。\n消息:" + text;
+        String result = dashScopeClient.chat(prompt, List.of());
+        if (result == null || !result.trim().startsWith("是")) {
+            return new WeatherIntent(false, "", "现在");
         }
-        String now = weatherClient.getNow(city);
-        String forecast = weatherClient.get3d(city);
-        client.sendText(fromUserId, now + "\n" + forecast);
+        String[] parts = result.trim().split("\\|", -1);
+        String city = parts.length > 1 ? parts[1].trim() : "";
+        String time = parts.length > 2 ? parts[2].trim() : "现在";
+        return new WeatherIntent(true, city, time);
     }
 
     /**
-     * 用 LLM 从消息里提取城市名,返回纯城市名或空串。
+     * 处理天气查询:按时间意图查实时天气 / 明天 / 3 天预报并回复。
      */
-    private String extractCity(String text) throws Exception {
-        String prompt = "从以下用户消息中提取要查询天气的城市名称,只返回城市名本身,不要任何标点、解释或额外文字。"
-                + "如果消息里没有城市名,只返回空。\n消息:" + text;
-        String city = dashScopeClient.chat(prompt, List.of());
-        return city == null ? "" : city.replace("。", "").replace(":", "").trim();
+    private void handleWeather(String fromUserId, String city, String time) throws Exception {
+        if (city == null || city.isBlank()) {
+            city = defaultCity;
+        }
+        switch (time) {
+            case "明天" -> client.sendText(fromUserId, weatherClient.getTomorrow(city));
+            case "几天" -> client.sendText(fromUserId, weatherClient.get3d(city));
+            default -> {
+                String now = weatherClient.getNow(city);
+                String forecast = weatherClient.get3d(city);
+                client.sendText(fromUserId, now + "\n" + forecast);
+            }
+        }
+    }
+
+    /**
+     * 带记忆的文本对话:取该用户历史 → 调 LLM → 把本轮对话追加进记忆。
+     */
+    private String chatWithMemory(String fromUserId, String text) throws Exception {
+        List<DashScopeClient.HistoryMessage> history = memoryStore.get(fromUserId);
+        String reply = dashScopeClient.chat(text, history);
+        memoryStore.append(fromUserId,
+                DashScopeClient.HistoryMessage.user(text),
+                DashScopeClient.HistoryMessage.assistant(reply));
+        return reply;
     }
 
     /**

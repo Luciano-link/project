@@ -11,6 +11,7 @@ import com.luciano.llm.ImageService;
 import com.luciano.llm.IntentService;
 import com.luciano.llm.LlmService;
 import com.luciano.llm.TtsService;
+import com.luciano.tool.GenerateImageTool;
 import com.luciano.weather.WeatherService;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
@@ -73,7 +74,8 @@ public class WechatBotRunner {
         try {
             ILinkConfig config = ILinkConfig.builder()
                     .connectTimeoutMs(15000)
-                    .readTimeoutMs(15000)
+                    // get_qrcode_status 和 getupdates 是长轮询接口,读超时需足够大,否则扫码/收消息易超时
+                    .readTimeoutMs(60000)
                     .writeTimeoutMs(15000)
                     .httpMaxRetries(3)
                     .retryBaseDelayMs(1000)
@@ -129,14 +131,80 @@ public class WechatBotRunner {
             if (item.getText_item() != null) {
                 String userText = item.getText_item().getText();
                 log.info("收到来自 {} 的文本消息: {}", fromUser, userText);
-                dispatchByIntent(fromUser, userText);
+                handleTextMessage(fromUser, userText);
             } else if (item.getVoice_item() != null) {
                 // 语音消息:读取服务端转写文本,按意图处理
                 String voiceText = item.getVoice_item().getText();
                 log.info("收到来自 {} 的语音消息,转写文本: {}", fromUser, voiceText);
                 dispatchByIntent(fromUser, voiceText);
+            } else if (item.getImage_item() != null) {
+                // 图片消息:下载并缓存,等待可能的文字描述(图文合并),超时则单独识图
+                log.info("收到来自 {} 的图片消息", fromUser);
+                handleImageMessage(fromUser, item);
             }
         }
+    }
+
+    /** 文本消息:先检查是否有待合并图片,有则图文合并识图,否则按意图分发 */
+    private void handleTextMessage(String fromUser, String userText) {
+        ImagePendingStore.PendingImage pending = ImagePendingStore.getPending(fromUser);
+        if (pending != null) {
+            log.info("检测到 {} 的待合并图片(id={}),执行图文合并识别", fromUser, pending.id());
+            handleImageRecognitionWithText(fromUser, userText, pending);
+            return;
+        }
+        dispatchByIntent(fromUser, userText);
+    }
+
+    /** 图片消息:下载缓存,延迟判断是否等文字描述 */
+    private void handleImageMessage(String fromUser, MessageItem item) {
+        replyExecutor.execute(() -> {
+            try {
+                byte[] imageBytes = client.downloadImageFromMessageItem(item);
+                if (imageBytes == null || imageBytes.length == 0) {
+                    log.warn("图片下载失败或为空,fromUser = {}", fromUser);
+                    safeSendText(fromUser, "抱歉,图片下载失败,请重试。");
+                    return;
+                }
+                String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
+                String imageId = ImagePendingStore.put(fromUser, imageBytes, fileName);
+                log.info("图片已缓存待合并,fromUser = {}, imageId = {}", fromUser, imageId);
+                // 延迟等待文字描述;超时仍无文字则单独识图(过期也识别,避免"发图不说话"无响应)
+                Thread.sleep(ImagePendingStore.MERGE_WINDOW_MS);
+                ImagePendingStore.PendingImage img = ImagePendingStore.takeForFallback(fromUser, imageId);
+                if (img != null) {
+                    log.info("等待文字超时,单独识图,fromUser = {}, imageId = {}", fromUser, imageId);
+                    handleImageRecognition(fromUser, img);
+                } else {
+                    log.info("图片已由图文合并消费,跳过兜底识图,fromUser = {}, imageId = {}", fromUser, imageId);
+                }
+            } catch (IOException e) {
+                log.error("图片下载失败,fromUser = {}", fromUser, e);
+                safeSendText(fromUser, "抱歉,图片处理失败,请稍后再试。");
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+    }
+
+    /** 单独识图(无文字描述) */
+    private void handleImageRecognition(String toUserId, ImagePendingStore.PendingImage img) {
+        String result = imageService.recognize(img.bytes(), img.fileName(), null);
+        log.info("图片识别结果 {}: {}", toUserId, result);
+        safeSendText(toUserId, result);
+    }
+
+    /** 图文合并识别:文字 + 待合并图片一起交给多模态模型 */
+    private void handleImageRecognitionWithText(String toUserId, String userText, ImagePendingStore.PendingImage img) {
+        // 消费该图片(若已被消费则按普通文本处理)
+        ImagePendingStore.PendingImage consumed = ImagePendingStore.take(toUserId, img.id());
+        if (consumed == null) {
+            dispatchByIntent(toUserId, userText);
+            return;
+        }
+        String result = imageService.recognize(consumed.bytes(), consumed.fileName(), userText);
+        log.info("图文合并识别结果 {}: {}", toUserId, result);
+        safeSendText(toUserId, result);
     }
 
     /** 意图识别并分发到具体处理器 */
@@ -162,11 +230,21 @@ public class WechatBotRunner {
         });
     }
 
-    /** 文本问答(带上下文) */
+    /** 文本问答(带上下文 + 工具调用),若生图工具生成了图片则一并发送 */
     private void handleText(String toUserId, String userText) {
         String reply = llmService.chat(toUserId, userText);
         log.info("LLM 回复 {}: {}", toUserId, reply);
         safeSendText(toUserId, reply);
+        byte[] pendingImage = GenerateImageTool.takePendingImage(toUserId);
+        if (pendingImage != null) {
+            String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
+            try {
+                client.sendImage(toUserId, pendingImage, fileName, "为你生成的图片");
+                log.info("工具生成的图片已发送 {}: {}", toUserId, fileName);
+            } catch (IOException e) {
+                log.error("工具生成的图片发送失败,toUserId = {}", toUserId, e);
+            }
+        }
     }
 
     /** 语音回复:LLM 生成文本 -> TTS 合成 mp3 -> 发送语音文件 */
@@ -217,6 +295,10 @@ public class WechatBotRunner {
 
     /** 安全发送文本,吞掉 IO 异常 */
     private void safeSendText(String toUserId, String text) {
+        if (text == null || text.isBlank()) {
+            log.warn("回复文本为空,不发送,toUserId = {}", toUserId);
+            return;
+        }
         try {
             client.sendTextWithTyping(toUserId, text, 500L);
         } catch (IOException e) {

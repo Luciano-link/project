@@ -42,13 +42,17 @@ public class WeatherService {
         }
         String loc = (location == null || location.isBlank()) ? properties.getDefaultLocation() : location;
         try {
-            String encodedLoc = java.net.URLEncoder.encode(loc, java.nio.charset.StandardCharsets.UTF_8);
-            String url = properties.getApiUrl()
-                    + "?key=" + apiKey
-                    + "&location=" + encodedLoc
-                    + "&language=zh-Hans&unit=c";
+            java.net.URI uri = org.springframework.web.util.UriComponentsBuilder
+                    .fromUriString(properties.getApiUrl())
+                    .queryParam("key", apiKey)
+                    .queryParam("location", loc)
+                    .queryParam("language", "zh-Hans")
+                    .queryParam("unit", "c")
+                    .encode()
+                    .build()
+                    .toUri();
             WeatherResponse resp = restClient.get()
-                    .uri(url)
+                    .uri(uri)
                     .retrieve()
                     .body(WeatherResponse.class);
             if (resp == null || resp.results == null || resp.results.isEmpty()) {

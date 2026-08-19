@@ -1,5 +1,13 @@
 package com.luciano.llm;
 
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversation;
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationParam;
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationResult;
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalConversationMessage;
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalMessageItemBase;
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalMessageItemImage;
+import com.alibaba.dashscope.aigc.multimodalconversation.MultiModalMessageItemText;
+import com.alibaba.dashscope.utils.Constants;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.luciano.config.LlmProperties;
@@ -13,7 +21,11 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
+import java.util.List;
+import java.util.UUID;
 
 /**
  * 文生图服务。
@@ -147,5 +159,99 @@ public class ImageService {
                 .replace("\r", "\\r")
                 .replace("\n", "\\n")
                 .replace("\t", "\\t");
+    }
+
+    /**
+     * 图片识别(多模态)。
+     * 结合可选的文字描述,让大模型理解图片内容。
+     *
+     * @param imageBytes 图片字节
+     * @param imageName  图片文件名(用于扩展名识别)
+     * @param text       可选文字描述,可与图片合并理解
+     * @return 识别结果文本;失败时返回提示
+     */
+    public String recognize(byte[] imageBytes, String imageName, String text) {
+        String apiKey = properties.getApiKey();
+        if (apiKey == null || apiKey.isBlank()) {
+            log.warn("未配置 llm.api-key,图片识别不可用");
+            return "抱歉,我还没有配置大模型能力。";
+        }
+        Path tmpFile = null;
+        try {
+            Constants.apiKey = apiKey;
+            String ext = guessExtension(imageName);
+            tmpFile = Files.createTempFile("wechat_img_", ext);
+            Files.write(tmpFile, imageBytes);
+
+            String userContent = text == null || text.isBlank()
+                    ? "请描述这张图片的内容。"
+                    : "请结合这句描述理解图片: " + text + "。然后回答用户的问题或描述图片内容。";
+
+            List<MultiModalMessageItemBase> items = new java.util.ArrayList<>();
+            items.add(new MultiModalMessageItemImage(tmpFile.toString()));
+            items.add(new MultiModalMessageItemText(userContent));
+
+            MultiModalConversationMessage userMsg = MultiModalConversationMessage.builder()
+                    .role("user")
+                    .content(items)
+                    .build();
+            MultiModalConversationParam param = MultiModalConversationParam.builder()
+                    .model(properties.getVisionModel())
+                    .messages(List.of(userMsg))
+                    .build();
+            MultiModalConversationResult result = new MultiModalConversation().call(param);
+            return extractMultiModalText(result);
+        } catch (Exception e) {
+            log.error("图片识别失败", e);
+            return "抱歉,图片识别失败,请稍后再试。";
+        } finally {
+            if (tmpFile != null) {
+                try {
+                    Files.deleteIfExists(tmpFile);
+                } catch (IOException ignored) {
+                    // 忽略临时文件清理失败
+                }
+            }
+        }
+    }
+
+    /** 从多模态结果中提取文本 */
+    private String extractMultiModalText(MultiModalConversationResult result) {
+        try {
+            var content = result.getOutput().getChoices().get(0).getMessage().getContent();
+            if (content == null || content.isEmpty()) {
+                return "抱歉,我无法理解这张图片。";
+            }
+            Object text = content.get(0).get("text");
+            if (text == null) {
+                return "抱歉,我无法理解这张图片。";
+            }
+            String textStr = text.toString();
+            return textStr.isBlank() ? "抱歉,我无法理解这张图片。" : textStr;
+        } catch (Exception e) {
+            log.warn("解析多模态结果失败: {}", e.getMessage());
+            return "抱歉,我无法理解这张图片。";
+        }
+    }
+
+    /** 根据文件名猜测扩展名,用于临时文件 */
+    private String guessExtension(String fileName) {
+        if (fileName == null) {
+            return ".png";
+        }
+        String lower = fileName.toLowerCase();
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) {
+            return ".jpg";
+        }
+        if (lower.endsWith(".gif")) {
+            return ".gif";
+        }
+        if (lower.endsWith(".webp")) {
+            return ".webp";
+        }
+        if (lower.endsWith(".bmp")) {
+            return ".bmp";
+        }
+        return ".png";
     }
 }

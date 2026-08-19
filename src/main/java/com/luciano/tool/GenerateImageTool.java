@@ -1,0 +1,100 @@
+package com.luciano.tool;
+
+import com.google.gson.JsonObject;
+import com.luciano.llm.ImageService;
+import jakarta.annotation.PostConstruct;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
+
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * 文生图工具。
+ * 通过 JSON Schema 向大模型描述函数签名:工具名 generate_image,参数 prompt(图片描述)。
+ * 生成的图片字节按用户缓存,由微信 Bot 在 Function Calling 完成后发送。
+ */
+@Component
+public class GenerateImageTool {
+
+    private static final Logger log = LoggerFactory.getLogger(GenerateImageTool.class);
+
+    /** 图片生成结果的临时缓存:userId -> 图片字节 */
+    private static final ConcurrentHashMap<String, byte[]> PENDING_IMAGES = new ConcurrentHashMap<>();
+
+    /** 待发送图片缓存上限,防止异常场景下内存膨胀 */
+    private static final int MAX_PENDING = 100;
+
+    private final ImageService imageService;
+    private final ToolRegistry registry;
+
+    public GenerateImageTool(ImageService imageService, ToolRegistry registry) {
+        this.imageService = imageService;
+        this.registry = registry;
+    }
+
+    @PostConstruct
+    public void init() {
+        registry.register(new ToolDefinition(
+                "generate_image",
+                "根据文字描述生成一张图片。用户要求画、生成、制作一张图(如风景画、动物、插图)时调用。",
+                imageSchema(),
+                arguments -> {
+                    String prompt = getString(arguments, "prompt", null);
+                    if (prompt == null || prompt.isBlank()) {
+                        return "错误:缺少图片描述参数 prompt。";
+                    }
+                    return generate(prompt);
+                }));
+    }
+
+    /** 生成图片并缓存,返回给 LLM 的执行结果文本 */
+    private String generate(String prompt) {
+        // 通过当前线程上下文传递 userId 不优雅,此处由 LlmService 在调用前设置归属
+        String userId = ImageContext.getCurrentUserId();
+        byte[] imageBytes = imageService.generate(prompt);
+        if (imageBytes == null) {
+            return "错误:图片生成失败,请提示用户换个描述或稍后再试。";
+        }
+        if (userId != null) {
+            if (PENDING_IMAGES.size() >= MAX_PENDING) {
+                // 达到上限时清空最旧的,防止内存膨胀
+                String oldestKey = PENDING_IMAGES.keys().nextElement();
+                PENDING_IMAGES.remove(oldestKey);
+                log.warn("待发送图片缓存达到上限,已丢弃用户 {} 的图片", oldestKey);
+            }
+            PENDING_IMAGES.put(userId, imageBytes);
+        }
+        return "图片已成功生成。请用一句简短的中文告诉用户图片已生成完毕。";
+    }
+
+    /** 获取并清除指定用户的待发送图片 */
+    public static byte[] takePendingImage(String userId) {
+        return userId == null ? null : PENDING_IMAGES.remove(userId);
+    }
+
+    /** 构造 JSON Schema 描述 generate_image 的参数 */
+    private JsonObject imageSchema() {
+        JsonObject schema = new JsonObject();
+        schema.addProperty("type", "object");
+
+        JsonObject properties = new JsonObject();
+        JsonObject prompt = new JsonObject();
+        prompt.addProperty("type", "string");
+        prompt.addProperty("description", "要生成图片的文字描述,需详细具体,如:一只在草地上奔跑的橘猫");
+        properties.add("prompt", prompt);
+        schema.add("properties", properties);
+
+        com.google.gson.JsonArray required = new com.google.gson.JsonArray();
+        required.add("prompt");
+        schema.add("required", required);
+        return schema;
+    }
+
+    private String getString(JsonObject obj, String key, String defaultVal) {
+        if (obj == null || !obj.has(key) || obj.get(key).isJsonNull()) {
+            return defaultVal;
+        }
+        return obj.get(key).getAsString();
+    }
+}

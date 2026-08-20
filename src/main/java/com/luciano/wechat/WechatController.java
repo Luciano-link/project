@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.ArrayList;
@@ -27,9 +28,11 @@ import java.util.Map;
 public class WechatController {
 
     private final WechatBotService botService;
+    private final FunctionCallService functionCallService;
 
-    public WechatController(WechatBotService botService) {
+    public WechatController(WechatBotService botService, FunctionCallService functionCallService) {
         this.botService = botService;
+        this.functionCallService = functionCallService;
     }
 
     /**
@@ -129,6 +132,52 @@ public class WechatController {
         try {
             botService.sendText(request.toUserId(), request.text());
             return ResponseEntity.ok(Map.of("success", true));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * 语音发送调试接口:用不同参数发一条短语音,排查语音消息为何收不到。
+     * 参数:toUserId(可选,默认最近发消息的人)、sampleRate(24000/16000)、
+     * playtimeUnit(ms/s)、transcript(true/false)。
+     */
+    @GetMapping("/test-voice")
+    public ResponseEntity<?> testVoice(
+            @RequestParam(required = false) String toUserId,
+            @RequestParam(required = false) Integer sampleRate,
+            @RequestParam(required = false) String playtimeUnit,
+            @RequestParam(required = false, defaultValue = "false") boolean transcript) {
+        if (!botService.isLoggedIn()) {
+            return ResponseEntity.status(HttpStatus.UNAUTHORIZED)
+                    .body(Map.of("error", "未登录,请先访问 /wechat/qrcode 扫码"));
+        }
+        try {
+            return ResponseEntity.ok(botService.sendTestVoice(toUserId, sampleRate, playtimeUnit, transcript));
+        } catch (Exception e) {
+            return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
+                    .body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /**
+     * Function Calling 演示:输入一个问题,返回「模型→工具→模型」完整调用链。
+     * 例:GET /wechat/function-calling?q=北京明天天气怎么样
+     *     GET /wechat/function-calling?q=现在几点了
+     */
+    @GetMapping("/function-calling")
+    public ResponseEntity<?> functionCalling(@RequestParam String q) {
+        if (q == null || q.isBlank()) {
+            return ResponseEntity.badRequest().body(Map.of("error", "q 不能为空"));
+        }
+        try {
+            FunctionCallService.RunResult result = functionCallService.run(q);
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("question", result.question());
+            out.put("steps", result.steps());
+            out.put("finalAnswer", result.finalAnswer());
+            return ResponseEntity.ok(out);
         } catch (Exception e) {
             return ResponseEntity.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .body(Map.of("error", e.getMessage()));

@@ -133,11 +133,12 @@ public class LlmService {
         return messages;
     }
 
-    /** 构造请求参数(带工具定义) */
+    /** 构造请求参数(带工具定义 + 联网搜索) */
     private GenerationParam buildParam(List<Message> messages) {
         GenerationParam.GenerationParamBuilder<?, ?> builder = GenerationParam.builder()
                 .model(properties.getModel())
-                .messages(messages);
+                .messages(messages)
+                .enableSearch(properties.isSearchEnabled());
         if (!toolRegistry.getTools().isEmpty()) {
             builder.tools(toolRegistry.toSdkTools());
         }

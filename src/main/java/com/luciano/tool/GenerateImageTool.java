@@ -37,7 +37,7 @@ public class GenerateImageTool {
     public void init() {
         registry.register(new ToolDefinition(
                 "generate_image",
-                "根据文字描述生成一张图片。用户要求画、生成、制作一张图(如风景画、动物、插图)时调用。",
+                "根据文字描述生成一张图片。用户要求画、生成、制作一张图(如风景画、动物、插图)时调用。若用户要求结合天气/其他工具结果生成图片,请把之前的工具结果(如天气)融入图片描述,使图片更贴合场景。",
                 imageSchema(),
                 arguments -> {
                     String prompt = getString(arguments, "prompt", null);
@@ -65,7 +65,7 @@ public class GenerateImageTool {
             }
             PENDING_IMAGES.put(userId, imageBytes);
         }
-        return "图片已成功生成。请用一句简短的中文告诉用户图片已生成完毕。";
+        return "图片生成成功。请结合此前对话内容(如已查询的天气、用户的需求),用一句完整的中文总结图片内容并告知用户图片已生成。";
     }
 
     /** 获取并清除指定用户的待发送图片 */

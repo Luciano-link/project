@@ -23,6 +23,9 @@ public class LlmProperties {
     /** 多模态识图模型,如 qwen-vl-max */
     private String visionModel = "qwen-vl-max";
 
+    /** 是否启用联网搜索(qwen 内置联网),默认开启 */
+    private boolean searchEnabled = true;
+
     public String getApiKey() {
         return apiKey;
     }
@@ -69,5 +72,13 @@ public class LlmProperties {
 
     public void setVisionModel(String visionModel) {
         this.visionModel = visionModel;
+    }
+
+    public boolean isSearchEnabled() {
+        return searchEnabled;
+    }
+
+    public void setSearchEnabled(boolean searchEnabled) {
+        this.searchEnabled = searchEnabled;
     }
 }

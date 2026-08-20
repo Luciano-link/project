@@ -51,11 +51,11 @@ public class ToolRegistry {
     }
 
     /**
-     * 执行工具。
+     * 执行工具(带超时与限流)。
      *
      * @param name 工具名
      * @param arguments JSON 格式参数
-     * @return 执行结果文本;工具不存在时返回错误提示
+     * @return 执行结果文本;工具不存在/超时/限流时返回错误提示
      */
     public String execute(String name, JsonObject arguments) {
         ToolDefinition tool = tools.get(name);
@@ -63,13 +63,8 @@ public class ToolRegistry {
             log.warn("未找到工具: {}", name);
             return "错误:工具 " + name + " 不存在。";
         }
-        try {
-            String result = tool.executor().execute(arguments);
-            log.info("工具 {} 执行完成", name);
-            return result;
-        } catch (Exception e) {
-            log.error("工具 {} 执行失败,参数 = {}", name, arguments, e);
-            return "错误:工具 " + name + " 执行失败: " + e.getMessage();
-        }
+        String result = ToolExecutionGuard.executeGuarded(name, tool.executor(), arguments);
+        log.info("工具 {} 执行完成", name);
+        return result;
     }
 }

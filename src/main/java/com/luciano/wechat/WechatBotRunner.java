@@ -12,7 +12,6 @@ import com.luciano.llm.IntentService;
 import com.luciano.llm.LlmService;
 import com.luciano.llm.TtsService;
 import com.luciano.tool.GenerateImageTool;
-import com.luciano.weather.WeatherService;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -40,7 +39,6 @@ public class WechatBotRunner {
     private final IntentService intentService;
     private final TtsService ttsService;
     private final ImageService imageService;
-    private final WeatherService weatherService;
     private final LoginStateStore loginStateStore;
 
     private ILinkClient client;
@@ -63,13 +61,11 @@ public class WechatBotRunner {
                            IntentService intentService,
                            TtsService ttsService,
                            ImageService imageService,
-                           WeatherService weatherService,
                            LoginStateStore loginStateStore) {
         this.llmService = llmService;
         this.intentService = intentService;
         this.ttsService = ttsService;
         this.imageService = imageService;
-        this.weatherService = weatherService;
         this.loginStateStore = loginStateStore;
     }
 
@@ -249,6 +245,12 @@ public class WechatBotRunner {
             log.info("收到空文本消息,忽略,toUserId = {}", toUserId);
             return;
         }
+        // 语音关键词快速判断:用户明确要求语音时优先语音路径(即使夹杂天气/问答等复合需求)
+        if (hasVoiceDirective(userText)) {
+            log.info("检测到语音指令,走语音回复,toUserId = {}", toUserId);
+            replyExecutor.execute(() -> handleVoice(toUserId, userText));
+            return;
+        }
         replyExecutor.execute(() -> {
             try {
                 IntentService.IntentResult intent = intentService.detect(userText);
@@ -256,7 +258,7 @@ public class WechatBotRunner {
                 switch (intent.intent()) {
                     case VOICE -> handleVoice(toUserId, userText);
                     case IMAGE -> handleImage(toUserId, userText);
-                    case WEATHER -> handleWeather(toUserId, intent.city());
+                    // 天气不再走独立快速路径,统一走工具链(LLM 自主处理"查天气+生图"等复合需求)
                     default -> handleText(toUserId, userText);
                 }
             } catch (Exception e) {
@@ -264,6 +266,14 @@ public class WechatBotRunner {
                 safeSendText(toUserId, "抱歉,处理你的消息时出错了,请稍后再试。");
             }
         });
+    }
+
+    /** 判断文本是否含明确语音指令关键词 */
+    private boolean hasVoiceDirective(String text) {
+        return text.contains("用语音") || text.contains("语音回复")
+                || text.contains("语音说") || text.contains("语音回答")
+                || text.contains("用声音") || text.contains("朗读")
+                || text.contains("读给我听") || text.contains("念给我听");
     }
 
     /** 文本问答(带上下文 + 工具调用 + 轨迹展示),若生图工具生成了图片则一并发送 */
@@ -298,8 +308,7 @@ public class WechatBotRunner {
     private void handleVoice(String toUserId, String userText) {
         try {
             client.startTyping(toUserId);
-            String replyText = llmService.chat(toUserId, userText);
-            byte[] mp3 = ttsService.synthesize(replyText);
+            String replyText = llmService.chat(toUserId, userText);            byte[] mp3 = ttsService.synthesize(replyText);
             if (mp3 == null) {
                 log.warn("语音合成失败,改发文本,toUserId = {}", toUserId);
                 safeSendText(toUserId, replyText);
@@ -331,13 +340,6 @@ public class WechatBotRunner {
             log.error("文生图回复失败,toUserId = {}", toUserId, e);
             safeSendText(toUserId, "抱歉,图片生成失败,请稍后再试。");
         }
-    }
-
-    /** 天气查询 */
-    private void handleWeather(String toUserId, String city) {
-        String reply = weatherService.getWeatherNow(city);
-        log.info("天气查询回复 {}: {}", toUserId, reply);
-        safeSendText(toUserId, reply);
     }
 
     /** 安全发送文本,吞掉 IO 异常 */

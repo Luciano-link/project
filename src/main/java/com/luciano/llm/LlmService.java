@@ -33,7 +33,10 @@ public class LlmService {
 
     private static final Logger log = LoggerFactory.getLogger(LlmService.class);
 
-    private static final String SYSTEM_PROMPT = "你是一个友好、乐于助人的微信机器人助手,回答要简洁准确,使用中文。当需要查询实时信息或生成图片时,请调用提供的工具。";
+    private static final String SYSTEM_PROMPT = "你是一个友好、乐于助人的微信机器人助手,回答要简洁准确,使用中文。"
+            + "调用规则:查询天气/生成图片/发送邮件时调用对应工具;"
+            + "需要最新资讯、新闻、实时数据时使用联网搜索;"
+            + "普通聊天直接回答。多步任务请按顺序调用工具,后一步参数使用前一步的真实结果。";
 
     /** 触发摘要压缩的历史消息条数 */
     private static final int SUMMARY_TRIGGER = 24;
@@ -149,14 +152,13 @@ public class LlmService {
         return messages;
     }
 
-    /** 构造请求参数(带工具定义;有工具时优先工具调用,不叠加联网搜索避免抢答) */
+    /** 构造请求参数(搜索与工具并存,LLM 自主决定:天气等用工具,实时信息用搜索) */
     private GenerationParam buildParam(List<Message> messages) {
-        boolean hasTools = !toolRegistry.getTools().isEmpty();
         GenerationParam.GenerationParamBuilder<?, ?> builder = GenerationParam.builder()
                 .model(properties.getModel())
                 .messages(messages)
-                .enableSearch(properties.isSearchEnabled() && !hasTools);
-        if (hasTools) {
+                .enableSearch(properties.isSearchEnabled());
+        if (!toolRegistry.getTools().isEmpty()) {
             builder.tools(toolRegistry.toSdkTools());
         }
         return builder.build();

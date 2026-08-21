@@ -3,18 +3,50 @@ package com.luciano.wechat;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 待合并图片缓存。
- * 用于"图文/文图两条消息"场景:用户发图片后短时间内再发文字,
+ * 待合并图片/文字缓存。
+ * 用于"图文/文图两条消息"场景:先发图后发文字,或先发文字后发图,
  * 两条消息需要合并交给多模态模型理解。
- * 图片缓存带时间戳,超时未等到文字则单独识图。
+ * 缓存带时间戳,超时未等到对方则单独处理。
  */
 public final class ImagePendingStore {
 
     /** 待合并图片缓存:userId -> 图片信息 */
     private static final ConcurrentHashMap<String, PendingImage> PENDING = new ConcurrentHashMap<>();
 
-    /** 图片等待文字描述的最大时间(毫秒):发图后短暂等待可能的文字补充,超时立即自动识图 */
-    public static final long MERGE_WINDOW_MS = 15000;
+    /** 待合并文字缓存:userId -> 文字信息(先发文字后发图的场景) */
+    private static final ConcurrentHashMap<String, PendingText> PENDING_TEXTS = new ConcurrentHashMap<>();
+
+    /** 图片/文字等待对方的最大时间(毫秒):覆盖"先发文字/图片再补对方"的上传间隔 */
+    public static final long MERGE_WINDOW_MS = 20000;
+
+    /** 待合并文字条目 */
+    public record PendingText(String id, String text, long timestamp) {
+        public boolean expired() {
+            return System.currentTimeMillis() - timestamp > MERGE_WINDOW_MS;
+        }
+    }
+
+    /** 缓存一条待合并文字,返回唯一 id */
+    public static String putText(String userId, String text) {
+        String id = java.util.UUID.randomUUID().toString();
+        PENDING_TEXTS.put(userId, new PendingText(id, text, System.currentTimeMillis()));
+        return id;
+    }
+
+    /** 获取最近的待合并文字(不消费),无或过期返回 null */
+    public static PendingText getPendingText(String userId) {
+        PendingText pt = PENDING_TEXTS.get(userId);
+        return (pt != null && !pt.expired()) ? pt : null;
+    }
+
+    /** 取出待合并文字(消费),无或过期返回 null */
+    public static PendingText takeText(String userId) {
+        PendingText pt = PENDING_TEXTS.remove(userId);
+        if (pt != null && pt.expired()) {
+            return null;
+        }
+        return pt;
+    }
 
     /** 待合并图片条目 */
     public record PendingImage(String id, byte[] bytes, String fileName, long timestamp) {

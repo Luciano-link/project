@@ -13,8 +13,8 @@ public final class ImagePendingStore {
     /** 待合并图片缓存:userId -> 图片信息 */
     private static final ConcurrentHashMap<String, PendingImage> PENDING = new ConcurrentHashMap<>();
 
-    /** 图片等待文字描述的最大时间(毫秒):覆盖"先发图、稍后打字补充说明"的真实节奏 */
-    public static final long MERGE_WINDOW_MS = 180000;
+    /** 图片等待文字描述的最大时间(毫秒):发图后短暂等待可能的文字补充,超时立即自动识图 */
+    public static final long MERGE_WINDOW_MS = 15000;
 
     /** 待合并图片条目 */
     public record PendingImage(String id, byte[] bytes, String fileName, long timestamp) {

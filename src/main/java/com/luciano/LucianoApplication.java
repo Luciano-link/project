@@ -5,10 +5,11 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import com.luciano.config.LlmProperties;
 import com.luciano.config.MailProperties;
+import com.luciano.config.SecurityProperties;
 import com.luciano.config.WeatherProperties;
 
 @SpringBootApplication
-@EnableConfigurationProperties({LlmProperties.class, WeatherProperties.class, MailProperties.class})
+@EnableConfigurationProperties({LlmProperties.class, WeatherProperties.class, MailProperties.class, SecurityProperties.class})
 public class LucianoApplication {
 
 	public static void main(String[] args) {

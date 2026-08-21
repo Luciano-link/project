@@ -75,7 +75,7 @@ public class IntentService {
                     .resultFormat(GenerationParam.ResultFormat.MESSAGE)
                     .build();
             GenerationResult result = new Generation().call(param);
-            String text = result.getOutput().getText();
+            String text = extractText(result);
             log.debug("意图识别原始返回: {}", text);
             return parse(text);
         } catch (Exception e) {
@@ -85,8 +85,7 @@ public class IntentService {
     }
 
     /** 解析 LLM 返回的 JSON,容忍多余前后缀 */
-    private IntentResult parse(String text) {
-        if (text == null) {
+    private IntentResult parse(String text) {        if (text == null) {
             return new IntentResult(Intent.TEXT, null);
         }
         String json = text.trim();
@@ -116,5 +115,23 @@ public class IntentService {
             }
         }
         return new IntentResult(intent, city);
+    }
+
+    /** 提取 LLM 文本:优先 getText,部分场景内容在 choices[0].message.content */
+    private String extractText(GenerationResult result) {
+        if (result.getOutput() == null) {
+            return null;
+        }
+        String text = result.getOutput().getText();
+        if (text != null && !text.isBlank()) {
+            return text;
+        }
+        if (result.getOutput().getChoices() != null && !result.getOutput().getChoices().isEmpty()) {
+            Message msg = result.getOutput().getChoices().get(0).getMessage();
+            if (msg != null && msg.getContent() != null && !msg.getContent().isBlank()) {
+                return msg.getContent();
+            }
+        }
+        return null;
     }
 }

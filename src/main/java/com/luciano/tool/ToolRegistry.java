@@ -63,7 +63,8 @@ public class ToolRegistry {
             log.warn("未找到工具: {}", name);
             return "错误:工具 " + name + " 不存在。";
         }
-        String result = ToolExecutionGuard.executeGuarded(name, tool.executor(), arguments);
+        String userId = ImageContext.getCurrentUserId();
+        String result = ToolExecutionGuard.executeGuarded(name, tool.executor(), arguments, userId);
         log.info("工具 {} 执行完成", name);
         return result;
     }

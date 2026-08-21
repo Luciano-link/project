@@ -41,8 +41,11 @@ public class WechatBotRunner {
     private final TtsService ttsService;
     private final ImageService imageService;
     private final WeatherService weatherService;
+    private final LoginStateStore loginStateStore;
 
     private ILinkClient client;
+    /** 最近一次二维码内容(供 Web 页面展示) */
+    private volatile String qrcodeContent;
     /** 有界线程池:核心 2,最大 8,队列 100,防止恶意消息耗尽资源 */
     private final ThreadPoolExecutor replyExecutor = new ThreadPoolExecutor(
             2, 8, 60L, TimeUnit.SECONDS,
@@ -60,12 +63,14 @@ public class WechatBotRunner {
                            IntentService intentService,
                            TtsService ttsService,
                            ImageService imageService,
-                           WeatherService weatherService) {
+                           WeatherService weatherService,
+                           LoginStateStore loginStateStore) {
         this.llmService = llmService;
         this.intentService = intentService;
         this.ttsService = ttsService;
         this.imageService = imageService;
         this.weatherService = weatherService;
+        this.loginStateStore = loginStateStore;
     }
 
     /** 项目启动后自动执行 */
@@ -85,12 +90,13 @@ public class WechatBotRunner {
                     .channelVersion("1.0.0")
                     .build();
 
-            client = ILinkClient.builder()
+            var builder = ILinkClient.builder()
                     .config(config)
                     .onLogin(new OnLoginListener() {
                         @Override
                         public void onLoginSuccess(LoginContext context) {
                             log.info("微信登录成功,botId = {}", context.getBotId());
+                            loginStateStore.save(context);
                         }
 
                         @Override
@@ -105,20 +111,50 @@ public class WechatBotRunner {
                                 handleMessage(msg);
                             }
                         }
-                    })
-                    .build();
+                    });
 
-            String qrCodeContent = client.executeLogin();
-            log.info("请用微信扫描以下二维码登录机器人:");
-            System.out.println("============================== 二维码内容 ==============================");
-            System.out.println(qrCodeContent);
-            System.out.println("==========================================================================");
-            log.info("二维码内容已输出,请用支持渲染二维码的工具(如 QR 码生成器)生成后扫码登录");
+            // 尝试免扫码恢复登录
+            com.github.wechat.ilink.sdk.core.login.LoginContext saved = loginStateStore.load();
+            if (saved != null) {
+                builder.loginContext(saved);
+                log.info("检测到已保存的登录态,尝试免扫码恢复...");
+            }
+
+            client = builder.build();
+
+            if (client.isLoggedIn()) {
+                log.info("登录态恢复成功,botId = {}", client.getLoginContext().getBotId());
+            } else {
+                this.qrcodeContent = client.executeLogin();
+                log.info("请用微信扫描以下二维码登录机器人:");
+                System.out.println("============================== 二维码内容 ==============================");
+                System.out.println(this.qrcodeContent);
+                System.out.println("==========================================================================");
+                log.info("二维码内容已输出,可用 Web 页面 /wechat/qrcode 查看");
+            }
             keepAlive.await();
         } catch (Exception e) {
             log.error("微信客户端启动失败", e);
             throw new IllegalStateException("微信客户端启动失败", e);
         }
+    }
+
+    /** 是否已登录 */
+    public boolean isLoggedIn() {
+        return client != null && client.isLoggedIn();
+    }
+
+    /** 获取二维码内容(未登录时),已登录返回 null */
+    public String getQrcodeContent() {
+        return isLoggedIn() ? null : qrcodeContent;
+    }
+
+    /** 获取已登录的 botId,未登录返回 null */
+    public String getBotId() {
+        if (client == null || !client.isLoggedIn() || client.getLoginContext() == null) {
+            return null;
+        }
+        return client.getLoginContext().getBotId();
     }
 
     /** 处理单条消息:按消息类型分发 */
@@ -230,11 +266,13 @@ public class WechatBotRunner {
         });
     }
 
-    /** 文本问答(带上下文 + 工具调用),若生图工具生成了图片则一并发送 */
+    /** 文本问答(带上下文 + 工具调用 + 轨迹展示),若生图工具生成了图片则一并发送 */
     private void handleText(String toUserId, String userText) {
-        String reply = llmService.chat(toUserId, userText);
+        LlmService.ChatResult chat = llmService.chatWithTrace(toUserId, userText);
+        String reply = chat.reply();
         log.info("LLM 回复 {}: {}", toUserId, reply);
-        safeSendText(toUserId, reply);
+        String finalText = chat.steps().isEmpty() ? reply : reply + appendToolTrace(chat.steps());
+        safeSendText(toUserId, finalText);
         byte[] pendingImage = GenerateImageTool.takePendingImage(toUserId);
         if (pendingImage != null) {
             String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
@@ -245,6 +283,15 @@ public class WechatBotRunner {
                 log.error("工具生成的图片发送失败,toUserId = {}", toUserId, e);
             }
         }
+    }
+
+    /** 生成工具调用轨迹展示文本 */
+    private String appendToolTrace(List<LlmService.ToolStep> steps) {
+        StringBuilder sb = new StringBuilder("\n\n⚙️ 本次调用工具:\n");
+        for (LlmService.ToolStep step : steps) {
+            sb.append("· ").append(step.tool()).append('(').append(step.arguments()).append(")\n");
+        }
+        return sb.toString().trim();
     }
 
     /** 语音回复:LLM 生成文本 -> TTS 合成 mp3 -> 发送语音文件 */

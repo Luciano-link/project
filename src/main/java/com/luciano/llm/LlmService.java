@@ -75,9 +75,25 @@ public class LlmService {
      * @return 最终回复文本
      */
     public String chat(String userId, String userText) {
+        return chatWithTrace(userId, userText).reply();
+    }
+
+    /** 对话结果:最终回复 + 工具调用轨迹 */
+    public record ChatResult(String reply, List<ToolStep> steps) {
+    }
+
+    /** 一次工具调用记录 */
+    public record ToolStep(String tool, String arguments, String result) {
+    }
+
+    /**
+     * 带上下文的回复,返回最终文本与工具调用轨迹。
+     */
+    public ChatResult chatWithTrace(String userId, String userText) {
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
-            return "抱歉,我还没有配置大模型能力,请联系管理员配置 llm.api-key 后再试。";
+            return new ChatResult("抱歉,我还没有配置大模型能力,请联系管理员配置 llm.api-key 后再试。", List.of());
         }
+        List<ToolStep> steps = new ArrayList<>();
         try {
             compressIfNeeded(userId);
 
@@ -93,7 +109,7 @@ public class LlmService {
                 ImageContext.setCurrentUserId(userId);
                 try {
                     appendAssistantToolCall(messages, result);
-                    executeToolCalls(messages, result);
+                    executeToolCalls(messages, result, steps);
                     result = callGeneration(buildParam(messages));
                 } finally {
                     ImageContext.clear();
@@ -103,14 +119,14 @@ public class LlmService {
             String text = extractText(result);
             if (text == null || text.isBlank()) {
                 log.warn("大模型返回为空,requestId = {}", result.getRequestId());
-                return "抱歉,大模型没有返回内容,请稍后再试。";
+                return new ChatResult("抱歉,大模型没有返回内容,请稍后再试。", steps);
             }
 
             saveConversation(userId, userText, text);
-            return text;
+            return new ChatResult(text, steps);
         } catch (Exception e) {
             log.error("调用阿里云百炼失败,userId = {}", userId, e);
-            return "大模型调用失败,请稍后再试。";
+            return new ChatResult("大模型调用失败,请稍后再试。", steps);
         }
     }
 
@@ -133,13 +149,14 @@ public class LlmService {
         return messages;
     }
 
-    /** 构造请求参数(带工具定义 + 联网搜索) */
+    /** 构造请求参数(带工具定义;有工具时优先工具调用,不叠加联网搜索避免抢答) */
     private GenerationParam buildParam(List<Message> messages) {
+        boolean hasTools = !toolRegistry.getTools().isEmpty();
         GenerationParam.GenerationParamBuilder<?, ?> builder = GenerationParam.builder()
                 .model(properties.getModel())
                 .messages(messages)
-                .enableSearch(properties.isSearchEnabled());
-        if (!toolRegistry.getTools().isEmpty()) {
+                .enableSearch(properties.isSearchEnabled() && !hasTools);
+        if (hasTools) {
             builder.tools(toolRegistry.toSdkTools());
         }
         return builder.build();
@@ -187,8 +204,8 @@ public class LlmService {
                 .build());
     }
 
-    /** 执行所有工具调用,并把结果以 tool 角色回填 */
-    private void executeToolCalls(List<Message> messages, GenerationResult result) {
+    /** 执行所有工具调用,并把结果以 tool 角色回填,同时记录调用轨迹 */
+    private void executeToolCalls(List<Message> messages, GenerationResult result, List<ToolStep> steps) {
         Message assistantMsg = result.getOutput().getChoices().get(0).getMessage();
         for (ToolCallBase callBase : assistantMsg.getToolCalls()) {
             if (!(callBase instanceof ToolCallFunction call)) {
@@ -205,6 +222,7 @@ public class LlmService {
                 argObj = new JsonObject();
             }
             String toolResult = toolRegistry.execute(name, argObj);
+            steps.add(new ToolStep(name, arguments, toolResult));
             messages.add(Message.builder()
                     .role("tool")
                     .name(name)

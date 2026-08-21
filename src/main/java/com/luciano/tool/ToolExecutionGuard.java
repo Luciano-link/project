@@ -35,23 +35,28 @@ public final class ToolExecutionGuard {
     /**
      * 带超时与限流地执行工具。
      *
-     * @param name     工具名
-     * @param executor 实际执行逻辑(可能抛出异常)
+     * @param name      工具名
+     * @param executor  实际执行逻辑(可能抛出异常)
+     * @param arguments 工具参数
+     * @param userId    当前用户标识(用于工具内部分配结果归属,可为 null)
      * @return 执行结果文本
      */
     public static String executeGuarded(String name, ToolDefinition.ToolExecutor executor,
-                                        com.google.gson.JsonObject arguments) {
+                                        com.google.gson.JsonObject arguments, String userId) {
         if (!tryAcquire(name)) {
             log.warn("工具 {} 触发限流,拒绝执行", name);
             return "错误:工具 " + name + " 调用过于频繁,请稍后再试。";
         }
         CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
+            ImageContext.setCurrentUserId(userId);
             try {
                 String result = executor.execute(arguments);
                 return result == null ? "执行成功" : result;
             } catch (Exception e) {
                 log.error("工具 {} 执行异常", name, e);
                 return "错误:工具 " + name + " 执行失败: " + e.getMessage();
+            } finally {
+                ImageContext.clear();
             }
         });
         try {

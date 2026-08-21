@@ -21,9 +21,11 @@ public class WeatherService {
 
     private final WeatherProperties properties;
     private final RestClient restClient;
+    private final QWeatherClient qWeatherClient;
 
-    public WeatherService(WeatherProperties properties) {
+    public WeatherService(WeatherProperties properties, QWeatherClient qWeatherClient) {
         this.properties = properties;
+        this.qWeatherClient = qWeatherClient;
         this.restClient = RestClient.builder()
                 .baseUrl(properties.getApiUrl())
                 .build();
@@ -31,11 +33,17 @@ public class WeatherService {
 
     /**
      * 获取指定城市的实时天气。
+     * 优先使用和风天气增强(空气质量/预报);未配置和风 Key 时降级到心知天气。
      *
      * @param location 城市名(中文或拼音,如"北京"或"beijing");为空时使用默认城市
      * @return 格式化后的天气描述;失败或未配置 Key 时返回错误提示
      */
     public String getWeatherNow(String location) {
+        // 和风增强优先
+        String enhanced = qWeatherClient.getEnhancedWeather(location);
+        if (enhanced != null) {
+            return enhanced;
+        }
         String apiKey = properties.getApiKey();
         if (apiKey == null || apiKey.isBlank()) {
             return "天气功能未配置,请联系管理员在 application-local.properties 中配置 weather.api-key。";

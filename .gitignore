@@ -36,3 +36,7 @@ build/
 application-local.properties
 src/main/resources/application-local.properties
 application-*.local.properties
+
+### 运行时生成的文件(含登录凭证,绝不提交) ###
+wechat-login.json
+wechat-memory.json

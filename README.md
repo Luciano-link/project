@@ -26,20 +26,27 @@
 | 通义千问 / DashScope | 对话、视觉、图像生成 |
 | 和风天气 QWeather | 实时天气与预报 |
 
-## 架构
+## 架构(多用户会话)
 
 ```
-微信用户 ⇄ iLink 服务器 ⇄ WechatBotService(核心服务)
-                            ├── 意图识别      关键词快路径 + LLM 结构化判定(chat/voice/image/weather)
-                            ├── DashScopeClient  通义千问(对话/看图/画图/TTS 语音合成/ASR 语音识别)
-                            ├── AudioCodec       mp3/SILK/WAV 转码(语音收发)
-                            ├── WeatherClient    和风天气(实时/预报)
-                            ├── LoginStateStore  登录态持久化
-                            ├── MemoryStore      对话记忆持久化
-                            └── WechatController REST 接口
+用户A  ⇄ WechatSession(A) ┐
+用户B  ⇄ WechatSession(B) ┼→  WechatSessionManager(会话注册表 + 登录线程池)
+用户C  ⇄ WechatSession(C) ┘             │ 消息
+                                        ▼
+                              MessageDispatcher(共享大脑)
+                              ├── 意图识别  关键词快路径 + LLM 结构化判定(chat/voice/image/weather)
+                              ├── DashScopeClient  通义千问(对话/看图/画图/TTS/ASR)
+                              ├── FunctionCallService  工具注册表(天气/时间/计算/单位换算)
+                              ├── WeatherClient    和风天气(实时/预报)
+                              ├── AudioCodec       mp3/SILK/WAV 转码(语音收发)
+                              ├── MemoryStore      对话记忆(按用户隔离)
+                              └── WechatController REST 接口(会话级)
 ```
 
-消息处理流程:后台每 2 秒轮询 `getUpdates()` 拉取新消息 → 异步线程池按消息类型分发(图片/语音/文本)→ 意图识别(关键词快路径 + LLM 结构化 JSON,判定 文字回复 / 语音回复 / 生成图片 / 查天气)→ 调用对应能力 → 回复。
+- **一个会话 = 一个微信账号**:创建会话会分配一个专属 `ILinkClient`,扫码绑定后只服务该用户;
+- **多用户并发**:扫码登录的 HTTP 请求走登录线程池,互不阻塞;消息处理由共享线程池承担,记忆按用户隔离;
+- **登录态持久化**:每个会话登录成功后按 `sessionId` 保存到 `wechat-logins.json`,重启自动恢复,无需重新扫码;
+- **消息处理流程**:每个会话每 2 秒轮询 `getUpdates()` → 共享线程池按消息类型分发(图片/语音/文本)→ 意图识别 → 调用对应能力 → 通过该会话的 client 回复。
 
 ## 快速开始
 
@@ -71,9 +78,20 @@ qweather.api-key=你的key
 mvn spring-boot:run
 ```
 
-### 4. 扫码登录
+### 4. 创建会话并扫码登录(多用户)
 
-浏览器打开 http://localhost:8080/wechat/qrcode 扫码登录。登录成功后登录态会保存到本地,重启无需重复扫码。
+```bash
+# ① 创建会话,拿到专属 sessionId
+curl -X POST http://localhost:8080/wechat/sessions
+# → {"sessionId":"a1b2c3d4","message":"会话已创建,请访问 /wechat/sessions/{sessionId}/qrcode 扫码登录"}
+
+# ② 浏览器打开二维码(换成你的 sessionId)
+#    http://localhost:8080/wechat/sessions/a1b2c3d4/qrcode
+```
+
+扫码后即完成绑定,可给该微信账号发消息与机器人对话。每个用户创建自己的会话即可多人同时使用;
+登录态按 sessionId 保存到 `wechat-logins.json`,重启自动恢复,无需重复扫码。
+注销会话:`curl -X DELETE http://localhost:8080/wechat/sessions/{sessionId}`。
 
 ## 使用说明
 
@@ -97,21 +115,31 @@ mvn spring-boot:run
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET | `/wechat/qrcode` | 获取登录二维码 |
-| GET | `/wechat/status` | 查询登录状态 |
-| GET | `/wechat/messages` | 取出积压消息 |
-| POST | `/wechat/send` | 主动发送文本,body `{"toUserId":"xxx","text":"内容"}` |
+| POST | `/wechat/sessions` | 创建会话,返回 sessionId |
+| GET | `/wechat/sessions` | 会话列表 |
+| DELETE | `/wechat/sessions/{id}` | 注销会话,释放连接 |
+| GET | `/wechat/sessions/{id}/qrcode` | 获取登录二维码(浏览器打开扫码) |
+| GET | `/wechat/sessions/{id}/status` | 查询登录状态 |
+| GET | `/wechat/sessions/{id}/messages` | 取出积压消息 |
+| POST | `/wechat/sessions/{id}/send` | 主动发送文本,body `{"toUserId":"xxx","text":"内容"}` |
+| GET | `/wechat/sessions/{id}/test-voice` | 语音发送调试(采样率/时长单位/转写文本) |
+| GET | `/wechat/function-calling?q=...` | Function Calling 演示(纯 LLM,无需会话) |
 
 ## 项目结构
 
 ```
 src/main/java/com/luciano/wechat/
-├── WechatBotService.java   核心服务(登录、轮询、消息分发、自动回复)
-├── DashScopeClient.java    通义千问封装(对话/看图/画图)
-├── WeatherClient.java      和风天气封装(实时/预报)
-├── MemoryStore.java        对话记忆持久化(按用户,最近 20 条)
-├── WechatController.java   REST 接口
-└── LoginStateStore.java    登录态持久化
+├── WechatSessionManager.java  多用户会话注册表(Map<sessionId,会话>)+ 登录线程池
+├── WechatSession.java         单个用户的会话(专属 ILinkClient、二维码、轮询线程)
+├── MessageDispatcher.java     共享消息大脑(意图识别/天气/工具/语音回复/记忆)
+├── DashScopeClient.java       通义千问封装(对话/看图/画图/TTS/ASR/Function Calling)
+├── FunctionCallService.java   工具注册表(get_weather/get_current_time/calculate/unit_convert)
+├── WeatherClient.java         和风天气封装(实时/预报/空气质量/生活指数)
+├── MemoryStore.java           对话记忆持久化(按用户,最近 20 条)
+├── AudioCodec.java            mp3/SILK/WAV 转码(语音收发)
+├── Weather.java               天气数据模型
+├── WechatController.java      REST 接口(会话级)
+└── LoginStateStore.java       登录态持久化(按 sessionId)
 src/main/resources/
 ├── application.properties  非敏感配置
 └── secret.properties       API Key(需自行创建,不提交)

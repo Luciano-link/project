@@ -4,6 +4,7 @@ target/
 ### Secrets ###
 src/main/resources/secret.properties
 wechat-login.json
+wechat-logins.json
 wechat-memory.json
 .mvn/wrapper/maven-wrapper.jar
 !**/src/main/**/target/

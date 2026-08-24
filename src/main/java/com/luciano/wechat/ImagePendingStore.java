@@ -19,6 +19,9 @@ public final class ImagePendingStore {
     /** 图片/文字等待对方的最大时间(毫秒):覆盖"先发文字/图片再补对方"的上传间隔 */
     public static final long MERGE_WINDOW_MS = 20000;
 
+    /** 待合并图片缓存上限,防止大量发图不补文字时内存膨胀 */
+    private static final int MAX_PENDING = 200;
+
     /** 待合并文字条目 */
     public record PendingText(String id, String text, long timestamp) {
         public boolean expired() {
@@ -60,9 +63,24 @@ public final class ImagePendingStore {
 
     /** 缓存一张待合并图片,返回其唯一 id */
     public static String put(String userId, byte[] bytes, String fileName) {
+        evictIfNeeded();
         String id = java.util.UUID.randomUUID().toString();
         PENDING.put(userId, new PendingImage(id, bytes, fileName, System.currentTimeMillis()));
         return id;
+    }
+
+    /** 缓存达到上限时:先清过期项,仍超限则移除最旧的一条 */
+    private static void evictIfNeeded() {
+        if (PENDING.size() < MAX_PENDING) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        PENDING.entrySet().removeIf(e -> now - e.getValue().timestamp() > MERGE_WINDOW_MS);
+        if (PENDING.size() >= MAX_PENDING) {
+            PENDING.entrySet().stream()
+                    .min(java.util.Comparator.comparingLong(e -> e.getValue().timestamp()))
+                    .ifPresent(e -> PENDING.remove(e.getKey()));
+        }
     }
 
     /**

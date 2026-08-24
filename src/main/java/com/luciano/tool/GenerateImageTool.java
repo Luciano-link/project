@@ -19,8 +19,8 @@ public class GenerateImageTool {
 
     private static final Logger log = LoggerFactory.getLogger(GenerateImageTool.class);
 
-    /** 图片生成结果的临时缓存:userId -> 图片字节 */
-    private static final ConcurrentHashMap<String, byte[]> PENDING_IMAGES = new ConcurrentHashMap<>();
+    /** 图片生成结果的临时缓存:userId -> 图片字节列表(一轮可生成多张) */
+    private static final ConcurrentHashMap<String, java.util.List<byte[]>> PENDING_IMAGES = new ConcurrentHashMap<>();
 
     /** 待发送图片缓存上限,防止异常场景下内存膨胀 */
     private static final int MAX_PENDING = 100;
@@ -63,13 +63,14 @@ public class GenerateImageTool {
                 PENDING_IMAGES.remove(oldestKey);
                 log.warn("待发送图片缓存达到上限,已丢弃用户 {} 的图片", oldestKey);
             }
-            PENDING_IMAGES.put(userId, imageBytes);
+            // 多张图追加到同一用户的列表,避免并行生图时互相覆盖
+            PENDING_IMAGES.computeIfAbsent(userId, k -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(imageBytes);
         }
         return "图片生成成功。请结合此前对话内容(如已查询的天气、用户的需求),用一句完整的中文总结图片内容并告知用户图片已生成。";
     }
 
-    /** 获取并清除指定用户的待发送图片 */
-    public static byte[] takePendingImage(String userId) {
+    /** 获取并清除指定用户的全部待发送图片 */
+    public static java.util.List<byte[]> takePendingImages(String userId) {
         return userId == null ? null : PENDING_IMAGES.remove(userId);
     }
 

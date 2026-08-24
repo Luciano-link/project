@@ -5,6 +5,8 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -28,6 +30,9 @@ public final class ToolExecutionGuard {
 
     /** 工具名 -> 最近执行时间戳列表 */
     private static final ConcurrentHashMap<String, java.util.Deque<Long>> CALL_HISTORY = new ConcurrentHashMap<>();
+
+    /** 工具执行专用线程池:避免慢工具(生图等)占满公共池影响其他异步任务 */
+    private static final ExecutorService TOOL_POOL = Executors.newFixedThreadPool(8);
 
     private ToolExecutionGuard() {
     }
@@ -58,7 +63,7 @@ public final class ToolExecutionGuard {
             } finally {
                 ImageContext.clear();
             }
-        });
+        }, TOOL_POOL);
         try {
             return future.get(DEFAULT_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (TimeoutException e) {

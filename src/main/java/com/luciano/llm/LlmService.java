@@ -15,12 +15,16 @@ import com.luciano.conversation.ConversationService;
 import com.luciano.tool.ImageContext;
 import com.luciano.tool.ToolRegistry;
 import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * 阿里云百炼(通义千问)文本生成服务。
@@ -39,13 +43,19 @@ public class LlmService {
             + "普通聊天直接回答。多步任务请按顺序调用工具,后一步参数使用前一步的真实结果。";
 
     /** 触发摘要压缩的历史消息条数 */
-    private static final int SUMMARY_TRIGGER = 24;
+    private static final int SUMMARY_TRIGGER = 40;
 
     /** 摘要压缩后保留的窗口消息条数 */
     private static final int WINDOW_AFTER_SUMMARY = 16;
 
     /** Function Calling 最大工具调用轮次,防止死循环 */
     private static final int MAX_TOOL_ROUNDS = 3;
+
+    /** 摘要压缩线程池:异步生成摘要,不阻塞用户请求 */
+    private final ExecutorService summaryExecutor = Executors.newFixedThreadPool(2);
+
+    /** 工具并行执行线程池:同一轮多个工具调用并行跑,工具多时不串行排队 */
+    private final ExecutorService toolExecutor = Executors.newFixedThreadPool(4);
 
     private final LlmProperties properties;
     private final ConversationService conversationService;
@@ -68,6 +78,12 @@ public class LlmService {
         }
         Constants.apiKey = apiKey;
         log.info("阿里云百炼初始化完成,模型 = {}, 已注册工具数 = {}", properties.getModel(), toolRegistry.getTools().size());
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        summaryExecutor.shutdownNow();
+        toolExecutor.shutdownNow();
     }
 
     /**
@@ -93,6 +109,15 @@ public class LlmService {
      * 带上下文的回复,返回最终文本与工具调用轨迹。
      */
     public ChatResult chatWithTrace(String userId, String userText) {
+        return chatWithTrace(userId, userText, null);
+    }
+
+    /**
+     * 带上下文的回复,可注入 RAG 检索到的知识增强回答。
+     *
+     * @param knowledge RAG 检索到的参考内容,可为 null(无知识增强)
+     */
+    public ChatResult chatWithTrace(String userId, String userText, String knowledge) {
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
             return new ChatResult("抱歉,我还没有配置大模型能力,请联系管理员配置 llm.api-key 后再试。", List.of());
         }
@@ -100,7 +125,7 @@ public class LlmService {
         try {
             compressIfNeeded(userId);
 
-            List<Message> messages = buildMessages(userId, userText);
+            List<Message> messages = buildMessages(userId, userText, knowledge);
             GenerationParam param = buildParam(messages);
             GenerationResult result = callGeneration(param);
 
@@ -139,7 +164,7 @@ public class LlmService {
     }
 
     /** 组装带上下文的消息列表 */
-    private List<Message> buildMessages(String userId, String userText) {
+    private List<Message> buildMessages(String userId, String userText, String knowledge) {
         List<Message> messages = new ArrayList<>();
         String summary = conversationService.getSummary(userId);
         if (summary != null && !summary.isBlank()) {
@@ -148,6 +173,10 @@ public class LlmService {
         }
         messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(SYSTEM_PROMPT).build());
         messages.addAll(conversationService.getMessages(userId));
+        if (knowledge != null && !knowledge.isBlank()) {
+            messages.add(Message.builder().role(Role.SYSTEM.getValue())
+                    .content("以下是知识库检索到的参考信息,请基于它回答用户问题,不要编造:\n" + knowledge).build());
+        }
         messages.add(Message.builder().role(Role.USER.getValue()).content(userText).build());
         return messages;
     }
@@ -206,32 +235,56 @@ public class LlmService {
                 .build());
     }
 
-    /** 执行所有工具调用,并把结果以 tool 角色回填,同时记录调用轨迹 */
+    /** 执行所有工具调用(同一轮的工具并行执行,互不依赖时节省总耗时),并把结果以 tool 角色回填,同时记录调用轨迹 */
     private void executeToolCalls(List<Message> messages, GenerationResult result, List<ToolStep> steps) {
         Message assistantMsg = result.getOutput().getChoices().get(0).getMessage();
+        // 并行线程不继承主线程的 InheritableThreadLocal,需显式传递 userId 给工具(生图结果归属等)
+        String userId = ImageContext.getCurrentUserId();
+        List<CompletableFuture<ToolResult>> futures = new ArrayList<>();
+        List<ToolCallFunction> calls = new ArrayList<>();
         for (ToolCallBase callBase : assistantMsg.getToolCalls()) {
             if (!(callBase instanceof ToolCallFunction call)) {
                 continue;
             }
-            String name = call.getFunction().getName();
-            String arguments = call.getFunction().getArguments();
-            log.info("执行工具调用: name={}, arguments={}", name, arguments);
-            JsonObject argObj;
-            try {
-                argObj = JsonParser.parseString(arguments).getAsJsonObject();
-            } catch (Exception e) {
-                log.warn("工具参数解析失败,按空对象处理: {}", arguments, e);
-                argObj = new JsonObject();
-            }
-            String toolResult = toolRegistry.execute(name, argObj);
-            steps.add(new ToolStep(name, arguments, toolResult));
+            calls.add(call);
+            futures.add(CompletableFuture.supplyAsync(() -> runTool(call, userId), toolExecutor));
+        }
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
+        for (int i = 0; i < calls.size(); i++) {
+            ToolResult tr = futures.get(i).join();
+            steps.add(new ToolStep(tr.name(), tr.arguments(), tr.result()));
             messages.add(Message.builder()
                     .role("tool")
-                    .name(name)
-                    .toolCallId(call.getId())
-                    .content(toolResult == null ? "工具执行成功" : toolResult)
+                    .name(tr.name())
+                    .toolCallId(tr.callId())
+                    .content(tr.result() == null ? "工具执行成功" : tr.result())
                     .build());
         }
+    }
+
+    /** 执行单个工具调用(在 toolExecutor 线程运行) */
+    private ToolResult runTool(ToolCallFunction call, String userId) {
+        String name = call.getFunction().getName();
+        String arguments = call.getFunction().getArguments();
+        log.info("执行工具调用: name={}, arguments={}", name, arguments);
+        JsonObject argObj;
+        try {
+            argObj = JsonParser.parseString(arguments).getAsJsonObject();
+        } catch (Exception e) {
+            log.warn("工具参数解析失败,按空对象处理: {}", arguments, e);
+            argObj = new JsonObject();
+        }
+        ImageContext.setCurrentUserId(userId);
+        try {
+            String toolResult = toolRegistry.execute(name, argObj);
+            return new ToolResult(call.getId(), name, arguments, toolResult);
+        } finally {
+            ImageContext.clear();
+        }
+    }
+
+    /** 一次工具调用的执行结果 */
+    private record ToolResult(String callId, String name, String arguments, String result) {
     }
 
     /** 保存本轮对话到上下文 */
@@ -240,8 +293,8 @@ public class LlmService {
         conversationService.addMessage(userId, Message.builder().role(Role.ASSISTANT.getValue()).content(text).build());
     }
 
-    /** 上下文超长时压缩 */
-    private void compressIfNeeded(String userId) throws Exception {
+    /** 上下文超长时压缩(异步:摘要生成在线程池执行,不阻塞用户请求) */
+    private void compressIfNeeded(String userId) {
         if (conversationService.size(userId) <= SUMMARY_TRIGGER) {
             return;
         }
@@ -249,14 +302,21 @@ public class LlmService {
         if (oldest.isEmpty()) {
             return;
         }
-        String summary = summarize(oldest);
-        if (summary == null || summary.isBlank()) {
-            log.warn("摘要压缩失败,丢弃最旧消息,userId = {}", userId);
-            return;
-        }
-        String old = conversationService.getSummary(userId);
-        conversationService.setSummary(userId, old == null ? summary : old + "\n" + summary);
-        log.info("上下文已压缩,userId = {}, 丢弃 {} 条消息", userId, oldest.size());
+        log.info("触发异步摘要压缩,userId = {}, 丢弃 {} 条消息", userId, oldest.size());
+        summaryExecutor.execute(() -> {
+            try {
+                String summary = summarize(oldest);
+                if (summary == null || summary.isBlank()) {
+                    log.warn("异步摘要压缩失败,丢弃最旧消息,userId = {}", userId);
+                    return;
+                }
+                String old = conversationService.getSummary(userId);
+                conversationService.setSummary(userId, old == null ? summary : old + "\n" + summary);
+                log.info("异步摘要完成,userId = {}", userId);
+            } catch (Exception e) {
+                log.error("异步摘要失败,userId = {}", userId, e);
+            }
+        });
     }
 
     private String summarize(List<Message> messages) throws Exception {

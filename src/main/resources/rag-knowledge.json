@@ -1,0 +1,18 @@
+[
+  {
+    "keywords": ["Luciano", "你是什么", "介绍一下自己", "你的功能", "能干什么"],
+    "content": "Luciano 是一个基于 Spring Boot + 阿里云百炼(通义千问)的微信 AI 机器人,支持文本问答、联网搜索、天气查询、文生图、图片识别、语音收发、发送邮件、备忘录、多用户会话与上下文记忆等功能,由用户 Luciano 开发维护。"
+  },
+  {
+    "keywords": ["技术栈", "用什么写的", "Spring Boot", "JDK", "怎么实现的"],
+    "content": "项目技术栈:Java 17、Spring Boot 4.1、阿里云百炼 dashscope-sdk-java 2.20.6、微信 iLink Bot SDK(wechat-ilink-sdk 2.3.3)、Maven 构建,支持多用户多会话。"
+  },
+  {
+    "keywords": ["RAG", "检索增强", "什么是RAG"],
+    "content": "RAG(Retrieval-Augmented Generation,检索增强生成):先在外部知识库中检索与问题相关的片段,再拼接进 Prompt 交给大模型生成回答,弥补大模型知识截止、降低幻觉。本项目实现极简关键词检索版:按关键词匹配知识条目,命中后把内容注入 Prompt。"
+  },
+  {
+    "keywords": ["Skill", "技能", "什么是技能"],
+    "content": "Skill 是机器人预定义的高频确定性能力,由关键词直接触发、不经过大模型,零成本秒回。与工具(Function Calling)互补:工具由大模型语义判断调用,Skill 由规则直接命中。当前已实现备忘录技能。"
+  }
+]

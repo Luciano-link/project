@@ -15,14 +15,17 @@ import java.util.List;
 
 /**
  * 极简关键词检索版 RAG。
- * 知识库来自 rag-knowledge.json:每条知识含关键词列表与内容。
- * 用户消息命中任一关键词即返回对应内容,由路由注入 LLM Prompt 增强回答。
- * rag.enabled 为开关,可对比开启/关闭时的回答差异。
+ * 知识库来自 rag-knowledge.json。
+ * 支持可选 cities 字段:有城市限定时,仅当用户文本提到该城市才命中,避免串城。
+ * 可返回多条通用知识拼接(最多 {@link #MAX_HITS} 条)。
  */
 @Component
 public class RagService {
 
     private static final Logger log = LoggerFactory.getLogger(RagService.class);
+
+    /** 单次最多注入的知识条数,避免 Prompt 过长 */
+    private static final int MAX_HITS = 3;
 
     @Value("${rag.enabled:false}")
     private boolean enabled;
@@ -49,24 +52,67 @@ public class RagService {
         return enabled;
     }
 
-    /** 关键词检索:返回命中的知识内容;未开启或未命中返回 null */
+    /**
+     * 关键词检索:返回命中的知识内容(多条用分隔符拼接);未开启或未命中返回 null。
+     * 带 cities 的条目必须用户文本也提到对应城市才会命中。
+     */
     public String retrieve(String text) {
-        if (!enabled || knowledge.isEmpty()) {
+        if (!enabled || knowledge.isEmpty() || text == null || text.isBlank()) {
             return null;
         }
+        List<String> hits = new ArrayList<>();
         for (Knowledge k : knowledge) {
-            for (String keyword : k.keywords) {
-                if (text.contains(keyword)) {
-                    log.info("RAG 命中关键词: {}", keyword);
-                    return k.content;
-                }
+            if (hits.size() >= MAX_HITS) {
+                break;
             }
+            if (!cityAllowed(text, k) || !keywordHit(text, k)) {
+                continue;
+            }
+            hits.add(k.content);
+            log.info("RAG 命中: cities={}, keywords 样本={}", k.cities, sampleKeywords(k));
         }
-        return null;
+        if (hits.isEmpty()) {
+            return null;
+        }
+        return String.join("\n---\n", hits);
     }
 
-    /** 知识条目:关键词列表 + 参考内容 */
+    /** 无 cities 或空 = 通用知识;有 cities 则用户文本需包含其中任一城市名 */
+    private boolean cityAllowed(String text, Knowledge k) {
+        if (k.cities == null || k.cities.isEmpty()) {
+            return true;
+        }
+        for (String city : k.cities) {
+            if (city != null && !city.isBlank() && text.contains(city)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean keywordHit(String text, Knowledge k) {
+        if (k.keywords == null) {
+            return false;
+        }
+        for (String keyword : k.keywords) {
+            if (keyword != null && !keyword.isBlank() && text.contains(keyword)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String sampleKeywords(Knowledge k) {
+        if (k.keywords == null || k.keywords.isEmpty()) {
+            return "";
+        }
+        return k.keywords.get(0);
+    }
+
+    /** 知识条目:可选城市限定 + 关键词 + 参考内容 */
     public static class Knowledge {
+        /** 可选。非空时仅当用户提到这些城市之一才可命中,用于城市专属攻略 */
+        public List<String> cities;
         public List<String> keywords;
         public String content;
     }

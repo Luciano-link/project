@@ -175,7 +175,10 @@ public class LlmService {
         messages.addAll(conversationService.getMessages(userId));
         if (knowledge != null && !knowledge.isBlank()) {
             messages.add(Message.builder().role(Role.SYSTEM.getValue())
-                    .content("以下是知识库检索到的参考信息,请基于它回答用户问题,不要编造:\n" + knowledge).build());
+                    .content("以下是知识库参考信息。请优先采纳其中的通用框架与规则;"
+                            + "若某段标明仅适用于某城市、或与用户目标城市不符,必须忽略该段城市专属内容,"
+                            + "改用用户目标城市信息(可结合工具/联网搜索),不要把错误城市的景点餐厅写进回答:\n"
+                            + knowledge).build());
         }
         messages.add(Message.builder().role(Role.USER.getValue()).content(userText).build());
         return messages;

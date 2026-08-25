@@ -39,13 +39,25 @@ public class WechatController {
     private final SecurityProperties securityProperties;
     private final SkillRouter skillRouter;
     private final RagService ragService;
+    private final com.luciano.agent.ClarifyService clarifyService;
+    private final com.luciano.agent.TaskStateManager taskStateManager;
+    private final com.luciano.agent.PlannerService plannerService;
+    private final com.luciano.agent.ExecutorService executorService;
 
     public WechatController(SessionManager sessionManager, SecurityProperties securityProperties,
-                            SkillRouter skillRouter, RagService ragService) {
+                            SkillRouter skillRouter, RagService ragService,
+                            com.luciano.agent.ClarifyService clarifyService,
+                            com.luciano.agent.TaskStateManager taskStateManager,
+                            com.luciano.agent.PlannerService plannerService,
+                            com.luciano.agent.ExecutorService executorService) {
         this.sessionManager = sessionManager;
         this.securityProperties = securityProperties;
         this.skillRouter = skillRouter;
         this.ragService = ragService;
+        this.clarifyService = clarifyService;
+        this.taskStateManager = taskStateManager;
+        this.plannerService = plannerService;
+        this.executorService = executorService;
     }
 
     /** 创建会话:分配专属 client 并返回登录二维码(需鉴权) */
@@ -129,6 +141,69 @@ public class WechatController {
             return ResponseEntity.ok(Map.of("hit", "rag", "knowledge", knowledge));
         }
         return ResponseEntity.ok(Map.of("hit", "llm", "message", "未命中 Skill/RAG,将走 LLM 兜底闲聊"));
+    }
+
+    /** Agent 澄清调试:启动任务并生成引导(需鉴权,userId 可选) */
+    @PostMapping("/agent/start")
+    public ResponseEntity<?> agentStart(@RequestParam String goal,
+                                        @RequestParam(required = false) String userId,
+                                        HttpServletRequest request) {
+        if (!authorized(request)) {
+            return unauthorized();
+        }
+        String uid = (userId == null || userId.isBlank()) ? "debug-agent" : userId;
+        String guide = clarifyService.start(uid, goal);
+        return ResponseEntity.ok(Map.of("userId", uid, "guide", guide));
+    }
+
+    /** Agent 澄清调试:提交澄清回复,返回画像是否完整(需鉴权) */
+    @PostMapping("/agent/reply")
+    public ResponseEntity<?> agentReply(@RequestParam String text,
+                                        @RequestParam(required = false) String userId,
+                                        HttpServletRequest request) {
+        if (!authorized(request)) {
+            return unauthorized();
+        }
+        String uid = (userId == null || userId.isBlank()) ? "debug-agent" : userId;
+        boolean complete = clarifyService.parseReply(uid, text);
+        com.luciano.agent.TaskState state = taskStateManager.get(uid);
+        return ResponseEntity.ok(Map.of(
+                "userId", uid,
+                "complete", complete,
+                "phase", state == null ? "NONE" : state.getPhase().name(),
+                "missing", clarifyService.missingFields(uid),
+                "profile", state == null ? java.util.Map.of() : state.getProfile()));
+    }
+
+    /** Agent 拆解调试:基于画像生成子任务清单(需鉴权,阶段须为 EXECUTING) */
+    @PostMapping("/agent/plan")
+    public ResponseEntity<?> agentPlan(@RequestParam(required = false) String userId,
+                                       HttpServletRequest request) {
+        if (!authorized(request)) {
+            return unauthorized();
+        }
+        String uid = (userId == null || userId.isBlank()) ? "debug-agent" : userId;
+        com.luciano.agent.TaskState state = taskStateManager.get(uid);
+        if (state == null || state.getPhase() != com.luciano.agent.TaskState.Phase.EXECUTING) {
+            return ResponseEntity.status(400).body(Map.of("error", "任务不在执行阶段,请先 start+reply 完成澄清"));
+        }
+        String plan = plannerService.plan(state);
+        return ResponseEntity.ok(Map.of("plan", plan));
+    }
+
+    /** Agent 执行调试:逐步执行子任务,返回最终方案(需鉴权) */
+    @PostMapping("/agent/execute")
+    public ResponseEntity<?> agentExecute(@RequestParam(required = false) String userId,
+                                          HttpServletRequest request) {
+        if (!authorized(request)) {
+            return unauthorized();
+        }
+        String uid = (userId == null || userId.isBlank()) ? "debug-agent" : userId;
+        String finalPlan = executorService.execute(uid);
+        if (finalPlan == null) {
+            return ResponseEntity.status(400).body(Map.of("error", "无可执行任务,请先完成 start+reply+plan"));
+        }
+        return ResponseEntity.ok(Map.of("final", finalPlan));
     }
 
     /** 简单鉴权校验 */

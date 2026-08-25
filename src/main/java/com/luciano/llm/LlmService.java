@@ -18,6 +18,8 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -77,7 +79,13 @@ public class LlmService {
             return;
         }
         Constants.apiKey = apiKey;
-        log.info("阿里云百炼初始化完成,模型 = {}, 已注册工具数 = {}", properties.getModel(), toolRegistry.getTools().size());
+        log.info("阿里云百炼初始化完成,模型 = {}", properties.getModel());
+    }
+
+    /** 应用启动完成后统计工具数(此时各工具的 @PostConstruct 已注册,避免顺序问题) */
+    @EventListener(ApplicationReadyEvent.class)
+    public void onReady() {
+        log.info("应用启动完成,已注册工具数 = {}", toolRegistry.getTools().size());
     }
 
     @PreDestroy
@@ -161,6 +169,33 @@ public class LlmService {
     /** 兼容无上下文/无工具调用 */
     public String chat(String userText) {
         return chat("__anonymous__", userText);
+    }
+
+    /**
+     * 单轮无上下文调用(Agent 内部使用:澄清引导、画像提取等)。
+     *
+     * @param systemPrompt 系统提示词
+     * @param userText     用户输入
+     * @return 模型回复文本;失败或未配置 Key 时返回 null
+     */
+    public String ask(String systemPrompt, String userText) {
+        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
+            log.warn("未配置 llm.api-key,单轮调用不可用");
+            return null;
+        }
+        try {
+            List<Message> messages = new ArrayList<>();
+            messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(systemPrompt).build());
+            messages.add(Message.builder().role(Role.USER.getValue()).content(userText).build());
+            GenerationParam param = GenerationParam.builder()
+                    .model(properties.getModel())
+                    .messages(messages)
+                    .build();
+            return extractText(new Generation().call(param));
+        } catch (Exception e) {
+            log.error("单轮 LLM 调用失败", e);
+            return null;
+        }
     }
 
     /** 组装带上下文的消息列表 */

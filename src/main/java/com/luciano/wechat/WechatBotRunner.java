@@ -153,6 +153,7 @@ public class WechatBotRunner {
                 LlmService.ChatResult chat = llmService.chatWithTrace(toUserId, userText, knowledge);
                 log.info("[RAG] LLM 调用耗时 {}ms,userId = {}", System.currentTimeMillis() - t0, toUserId);
                 safeSendText(client, toUserId, chat.reply());
+                sendGeneratedImages(client, toUserId);
             } catch (Exception e) {
                 log.error("RAG 消息处理异常,toUserId = {}", toUserId, e);
                 safeSendText(client, toUserId, "抱歉,处理你的消息时出错了,请稍后再试。");
@@ -290,16 +291,22 @@ public class WechatBotRunner {
         log.info("LLM 回复 {}: {}", toUserId, reply);
         safeSendText(client, toUserId, reply);
         log.info("[{}] 发送用户耗时 {}ms,userId = {}", now(), System.currentTimeMillis() - t1, toUserId);
+        sendGeneratedImages(client, toUserId);
+    }
+
+    /** 发送工具生成的图片(生图工具的结果缓存),普通 LLM 与 RAG 两个路径共用 */
+    private void sendGeneratedImages(ILinkClient client, String toUserId) {
         List<byte[]> pendingImages = GenerateImageTool.takePendingImages(toUserId);
-        if (pendingImages != null) {
-            for (byte[] pendingImage : pendingImages) {
-                String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
-                try {
-                    client.sendImage(toUserId, pendingImage, fileName, "为你生成的图片");
-                    log.info("工具生成的图片已发送 {}: {}", toUserId, fileName);
-                } catch (IOException e) {
-                    log.error("工具生成的图片发送失败,toUserId = {}", toUserId, e);
-                }
+        if (pendingImages == null) {
+            return;
+        }
+        for (byte[] pendingImage : pendingImages) {
+            String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
+            try {
+                client.sendImage(toUserId, pendingImage, fileName, "为你生成的图片");
+                log.info("工具生成的图片已发送 {}: {}", toUserId, fileName);
+            } catch (IOException e) {
+                log.error("工具生成的图片发送失败,toUserId = {}", toUserId, e);
             }
         }
     }

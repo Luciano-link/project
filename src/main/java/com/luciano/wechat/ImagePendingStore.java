@@ -1,12 +1,15 @@
 package com.luciano.wechat;
 
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 /**
  * 待合并图片/文字缓存。
  * 用于"图文/文图两条消息"场景:先发图后发文字,或先发文字后发图,
  * 两条消息需要合并交给多模态模型理解。
- * 缓存带时间戳,超时未等到对方则单独处理。
+ * 缓存带时间戳,超时未等到对方则单独处理;定时线程周期性清理过期条目。
  */
 public final class ImagePendingStore {
 
@@ -15,6 +18,24 @@ public final class ImagePendingStore {
 
     /** 待合并文字缓存:userId -> 文字信息(先发文字后发图的场景) */
     private static final ConcurrentHashMap<String, PendingText> PENDING_TEXTS = new ConcurrentHashMap<>();
+
+    /** 定时清理线程:每分钟清除过期条目,防止图片字节长期滞留内存 */
+    private static final ScheduledExecutorService CLEANER = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "image-pending-cleaner");
+        t.setDaemon(true);
+        return t;
+    });
+
+    static {
+        CLEANER.scheduleWithFixedDelay(ImagePendingStore::cleanExpired, 60, 60, TimeUnit.SECONDS);
+    }
+
+    /** 清理所有过期条目 */
+    private static void cleanExpired() {
+        long now = System.currentTimeMillis();
+        PENDING.entrySet().removeIf(e -> now - e.getValue().timestamp() > MERGE_WINDOW_MS);
+        PENDING_TEXTS.entrySet().removeIf(e -> now - e.getValue().timestamp() > MERGE_WINDOW_MS);
+    }
 
     /** 图片/文字等待对方的最大时间(毫秒):覆盖"先发文字/图片再补对方"的上传间隔 */
     public static final long MERGE_WINDOW_MS = 20000;

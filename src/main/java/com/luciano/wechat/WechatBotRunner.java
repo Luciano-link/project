@@ -18,6 +18,7 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -41,16 +42,33 @@ public class WechatBotRunner {
     private final SkillRouter skillRouter;
     private final RagService ragService;
 
-    /** 有界线程池:核心 4,最大 16,队列 200,防止恶意消息耗尽资源 */
-    private final ThreadPoolExecutor replyExecutor = new ThreadPoolExecutor(
-            4, 16, 60L, TimeUnit.SECONDS,
-            new ArrayBlockingQueue<>(200),
-            r -> {
-                Thread t = new Thread(r, "bot-reply");
-                t.setDaemon(true);
-                return t;
-            },
-            new ThreadPoolExecutor.CallerRunsPolicy());
+    /** 按用户分片的串行执行器:同一用户消息固定路由到同一 worker,保证顺序;跨用户并行 */
+    private static final int USER_SHARDS = 8;
+    private final List<ThreadPoolExecutor> userShards = new ArrayList<>();
+
+    {
+        for (int i = 0; i < USER_SHARDS; i++) {
+            final int shard = i;
+            ThreadPoolExecutor e = new ThreadPoolExecutor(
+                    1, 1, 0L, TimeUnit.MILLISECONDS,
+                    new ArrayBlockingQueue<>(200),
+                    r -> {
+                        Thread t = new Thread(r, "bot-reply-" + shard);
+                        t.setDaemon(true);
+                        return t;
+                    });
+            // 队列满时丢弃并告警,防止无界堆积;正常规模下不会触发
+            e.setRejectedExecutionHandler((r, executor) ->
+                    log.warn("消息队列已满,丢弃消息任务: {}", r));
+            userShards.add(e);
+        }
+    }
+
+    /** 按用户提交任务:同一用户串行执行,跨用户分片并行 */
+    private void executeSerial(String userId, Runnable task) {
+        int shard = (userId == null ? 0 : Math.abs(userId.hashCode())) % USER_SHARDS;
+        userShards.get(shard).execute(task);
+    }
 
     public WechatBotRunner(LlmService llmService,
                            TtsService ttsService,
@@ -101,7 +119,7 @@ public class WechatBotRunner {
         if (pending != null) {
             log.info("检测到 {} 的待合并图片(id={}),执行图文合并识别", fromUser, pending.id());
             // 识别耗时长,异步执行,避免阻塞消息回调线程
-            replyExecutor.execute(() -> handleImageRecognitionWithText(client, fromUser, userText, pending));
+            executeSerial(fromUser, () -> handleImageRecognitionWithText(client, fromUser, userText, pending));
             return;
         }
         // 下行图片关键词("下面/这张/这个/下图"):用户提到图片但还没发,缓存为待合并文字等图片到达合并
@@ -110,7 +128,7 @@ public class WechatBotRunner {
             log.info("检测到下行图片关键词,等待图片上传,fromUser = {}, text = {}", fromUser, userText);
             // 用较长窗口等待(用户明确要图,给足上传时间);超时无图则提示发图
             final long waitMs = ImagePendingStore.MERGE_WINDOW_MS;
-            replyExecutor.execute(() -> {
+            executeSerial(fromUser, () -> {
                 try {
                     Thread.sleep(waitMs);
                     ImagePendingStore.PendingText pt = ImagePendingStore.takeText(fromUser);
@@ -147,7 +165,7 @@ public class WechatBotRunner {
 
     /** 命中 RAG:把知识库内容注入 Prompt 后走 LLM */
     private void handleTextWithKnowledge(ILinkClient client, String toUserId, String userText, String knowledge) {
-        replyExecutor.execute(() -> {
+        executeSerial(toUserId, () -> {
             try {
                 long t0 = System.currentTimeMillis();
                 LlmService.ChatResult chat = llmService.chatWithTrace(toUserId, userText, knowledge);
@@ -194,7 +212,7 @@ public class WechatBotRunner {
             if (pendingText != null) {
                 log.info("检测到 {} 的待合并文字(id={}),执行图文合并识别", fromUser, pendingText.id());
                 // 识别耗时长,异步执行,避免阻塞消息回调线程
-                replyExecutor.execute(() -> handleImageRecognitionWithText(client, fromUser, pendingText.text(),
+                executeSerial(fromUser, () -> handleImageRecognitionWithText(client, fromUser, pendingText.text(),
                         ImagePendingStore.getPending(fromUser)));
                 return;
             }
@@ -203,7 +221,7 @@ public class WechatBotRunner {
             ImagePendingStore.PendingImage img = ImagePendingStore.takeForFallback(fromUser, imageId);
             if (img != null) {
                 log.info("立即单独识图,fromUser = {}, imageId = {}", fromUser, imageId);
-                replyExecutor.execute(() -> handleImageRecognition(client, fromUser, img));
+                executeSerial(fromUser, () -> handleImageRecognition(client, fromUser, img));
             }
         } catch (IOException e) {
             log.error("图片下载失败,fromUser = {}", fromUser, e);
@@ -259,11 +277,11 @@ public class WechatBotRunner {
         // 语音关键词快速判断:用户明确要求语音时优先语音路径(即使夹杂天气/问答等复合需求)
         if (hasVoiceDirective(userText)) {
             log.info("检测到语音指令,走语音回复,toUserId = {}", toUserId);
-            replyExecutor.execute(() -> handleVoice(client, toUserId, userText));
+            executeSerial(toUserId, () -> handleVoice(client, toUserId, userText));
             return;
         }
         // 其余一律交给 LLM 工具链:LLM 自主决定聊天/天气/生图/搜索/邮件,秒回
-        replyExecutor.execute(() -> {
+        executeSerial(toUserId, () -> {
             try {
                 handleText(client, toUserId, userText);
             } catch (Exception e) {
@@ -351,6 +369,6 @@ public class WechatBotRunner {
 
     @PreDestroy
     public void stop() {
-        replyExecutor.shutdownNow();
+        userShards.forEach(ThreadPoolExecutor::shutdownNow);
     }
 }

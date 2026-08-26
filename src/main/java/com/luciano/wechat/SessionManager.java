@@ -11,6 +11,7 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import java.util.LinkedHashMap;
@@ -35,8 +36,14 @@ public class SessionManager {
     /** 创建会话的线程池:防止多个扫码登录的 HTTP 请求互相阻塞 */
     private final ExecutorService loginExecutor = Executors.newFixedThreadPool(4);
 
+    /** 会话数量上限,防止连接/内存膨胀 */
+    private static final int MAX_SESSIONS = 50;
+
     /** 会话集合:sessionId -> 微信客户端 */
     private final Map<String, ILinkClient> clients = new ConcurrentHashMap<>();
+
+    /** 会话创建时间:sessionId -> 创建时间戳(用于未登录会话清理) */
+    private final Map<String, Long> sessionCreated = new ConcurrentHashMap<>();
 
     private final WechatBotRunner handler;
     private final LoginStateStore loginStateStore;
@@ -49,10 +56,38 @@ public class SessionManager {
     /** 创建新会话:线程池中建 client 并申请二维码,返回 CompletableFuture<二维码内容> */
     public CompletableFuture<String> create(String sessionId) {
         return CompletableFuture.supplyAsync(() -> {
+            if (clients.size() >= MAX_SESSIONS && !evictIdleSession()) {
+                throw new IllegalStateException("会话数量已达上限(" + MAX_SESSIONS + "),请先清理空闲会话");
+            }
             ILinkClient client = buildClient(sessionId);
             clients.put(sessionId, client);
+            sessionCreated.put(sessionId, System.currentTimeMillis());
             return client.executeLogin();
         }, loginExecutor);
+    }
+
+    /** 清理一个未登录会话腾出空间,返回是否腾出成功 */
+    private boolean evictIdleSession() {
+        for (Map.Entry<String, ILinkClient> entry : clients.entrySet()) {
+            if (!entry.getValue().isLoggedIn()) {
+                remove(entry.getKey());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 定期清理超过 10 分钟仍未扫码登录的会话,防止连接泄漏 */
+    @Scheduled(fixedDelay = 5 * 60 * 1000)
+    public void cleanupExpiredSessions() {
+        long now = System.currentTimeMillis();
+        clients.forEach((sessionId, client) -> {
+            Long created = sessionCreated.get(sessionId);
+            if (!client.isLoggedIn() && created != null && now - created > 10 * 60 * 1000L) {
+                log.info("清理长时间未登录会话: {}", sessionId);
+                remove(sessionId);
+            }
+        });
     }
 
     /** 获取会话客户端,不存在返回 null */
@@ -75,6 +110,7 @@ public class SessionManager {
 
     /** 移除会话:关闭客户端并清除持久化登录态 */
     public void remove(String sessionId) {
+        sessionCreated.remove(sessionId);
         ILinkClient client = clients.remove(sessionId);
         if (client != null) {
             client.close();

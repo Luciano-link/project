@@ -43,13 +43,15 @@ public class WechatController {
     private final com.luciano.agent.TaskStateManager taskStateManager;
     private final com.luciano.agent.PlannerService plannerService;
     private final com.luciano.agent.ExecutorService executorService;
+    private final com.luciano.amap.AmapRouteService amapRouteService;
 
     public WechatController(SessionManager sessionManager, SecurityProperties securityProperties,
                             SkillRouter skillRouter, RagService ragService,
                             com.luciano.agent.ClarifyService clarifyService,
                             com.luciano.agent.TaskStateManager taskStateManager,
                             com.luciano.agent.PlannerService plannerService,
-                            com.luciano.agent.ExecutorService executorService) {
+                            com.luciano.agent.ExecutorService executorService,
+                            com.luciano.amap.AmapRouteService amapRouteService) {
         this.sessionManager = sessionManager;
         this.securityProperties = securityProperties;
         this.skillRouter = skillRouter;
@@ -58,6 +60,7 @@ public class WechatController {
         this.taskStateManager = taskStateManager;
         this.plannerService = plannerService;
         this.executorService = executorService;
+        this.amapRouteService = amapRouteService;
     }
 
     /** 创建会话:分配专属 client 并返回登录二维码(需鉴权) */
@@ -204,6 +207,17 @@ public class WechatController {
             return ResponseEntity.status(400).body(Map.of("error", "无可执行任务,请先完成 start+reply+plan"));
         }
         return ResponseEntity.ok(Map.of("final", finalPlan));
+    }
+
+    /** 高德路线调试:from→to 公交/地铁路线(需鉴权,city 可选用于消除同名地点歧义) */
+    @GetMapping("/amap/route")
+    public ResponseEntity<?> amapRoute(@RequestParam String from, @RequestParam String to,
+                                       @RequestParam(required = false) String city,
+                                       HttpServletRequest request) {
+        if (!authorized(request)) {
+            return unauthorized();
+        }
+        return ResponseEntity.ok(Map.of("route", amapRouteService.route(from, to, city)));
     }
 
     /** 简单鉴权校验 */

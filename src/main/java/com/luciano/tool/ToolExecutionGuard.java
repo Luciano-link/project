@@ -48,8 +48,8 @@ public final class ToolExecutionGuard {
      */
     public static String executeGuarded(String name, ToolDefinition.ToolExecutor executor,
                                         com.google.gson.JsonObject arguments, String userId) {
-        if (!tryAcquire(name)) {
-            log.warn("工具 {} 触发限流,拒绝执行", name);
+        if (!tryAcquire(name, userId)) {
+            log.warn("工具 {} 触发限流,拒绝执行,userId = {}", name, userId);
             return "错误:工具 " + name + " 调用过于频繁,请稍后再试。";
         }
         CompletableFuture<String> future = CompletableFuture.supplyAsync(() -> {
@@ -76,10 +76,11 @@ public final class ToolExecutionGuard {
         }
     }
 
-    /** 简单的滑动窗口限流:窗口内计数未超限则放行 */
-    private static boolean tryAcquire(String name) {
+    /** 滑动窗口限流(按 用户+工具):同一用户同一工具窗口内计数未超限则放行,避免一用户拖垮全工具 */
+    private static boolean tryAcquire(String name, String userId) {
         long now = System.currentTimeMillis();
-        java.util.Deque<Long> history = CALL_HISTORY.computeIfAbsent(name, k -> new java.util.ArrayDeque<>());
+        String key = name + "#" + (userId == null ? "anonymous" : userId);
+        java.util.Deque<Long> history = CALL_HISTORY.computeIfAbsent(key, k -> new java.util.ArrayDeque<>());
         synchronized (history) {
             while (!history.isEmpty() && now - history.peekFirst() > RATE_WINDOW_MS) {
                 history.pollFirst();

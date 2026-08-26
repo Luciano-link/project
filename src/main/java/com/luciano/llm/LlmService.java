@@ -179,6 +179,15 @@ public class LlmService {
      * @return 模型回复文本;失败或未配置 Key 时返回 null
      */
     public String ask(String systemPrompt, String userText) {
+        return ask(systemPrompt, userText, false);
+    }
+
+    /**
+     * 单轮无上下文调用(Agent 内部使用:澄清引导、画像提取等)。
+     *
+     * @param search 是否开启联网搜索(方案生成等需要实时/兜底信息的场景)
+     */
+    public String ask(String systemPrompt, String userText, boolean search) {
         if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
             log.warn("未配置 llm.api-key,单轮调用不可用");
             return null;
@@ -190,6 +199,7 @@ public class LlmService {
             GenerationParam param = GenerationParam.builder()
                     .model(properties.getModel())
                     .messages(messages)
+                    .enableSearch(search)
                     .build();
             return extractText(new Generation().call(param));
         } catch (Exception e) {

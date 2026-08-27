@@ -53,6 +53,9 @@ public class LlmService {
     /** Function Calling 最大工具调用轮次,防止死循环 */
     private static final int MAX_TOOL_ROUNDS = 3;
 
+    /** LLM 调用失败时的最大重试次数(指数退避) */
+    private static final int MAX_LLM_RETRIES = 2;
+
     /** 摘要压缩线程池:异步生成摘要,不阻塞用户请求 */
     private final ExecutorService summaryExecutor = Executors.newFixedThreadPool(2);
 
@@ -201,7 +204,7 @@ public class LlmService {
                     .messages(messages)
                     .enableSearch(search)
                     .build();
-            return extractText(new Generation().call(param));
+            return extractText(callWithRetry(param));
         } catch (Exception e) {
             log.error("单轮 LLM 调用失败", e);
             return null;
@@ -239,7 +242,25 @@ public class LlmService {
     }
 
     private GenerationResult callGeneration(GenerationParam param) throws Exception {
-        return new Generation().call(param);
+        return callWithRetry(param);
+    }
+
+    /** 带指数退避重试的 LLM 调用:网络抖动时自动重试,提高稳定性 */
+    private GenerationResult callWithRetry(GenerationParam param) throws Exception {
+        Exception last = null;
+        for (int attempt = 0; attempt <= MAX_LLM_RETRIES; attempt++) {
+            try {
+                return new Generation().call(param);
+            } catch (Exception e) {
+                last = e;
+                if (attempt < MAX_LLM_RETRIES) {
+                    long delay = 500L * (attempt + 1);
+                    log.warn("LLM 调用失败(第 {} 次),{}ms 后重试: {}", attempt + 1, delay, e.getMessage());
+                    Thread.sleep(delay);
+                }
+            }
+        }
+        throw last;
     }
 
     /** 判断 LLM 响应是否包含工具调用 */
@@ -374,7 +395,7 @@ public class LlmService {
                 .model(properties.getModel())
                 .messages(prompt)
                 .build();
-        GenerationResult result = new Generation().call(param);
+        GenerationResult result = callWithRetry(param);
         return extractText(result);
     }
 }

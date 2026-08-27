@@ -14,7 +14,9 @@ import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,8 +41,15 @@ public class SessionManager {
     /** 会话数量上限,防止连接/内存膨胀 */
     private static final int MAX_SESSIONS = 50;
 
+    /** 单会话消息积压上限,超出丢弃最旧,防止前端不轮询导致内存膨胀 */
+    private static final int MAX_PENDING_MESSAGES = 200;
+
     /** 会话集合:sessionId -> 微信客户端 */
     private final Map<String, ILinkClient> clients = new ConcurrentHashMap<>();
+
+    /** 会话消息积压:sessionId -> 收到的消息队列(供 REST 接口轮询取走,与自动回复并存) */
+    private final Map<String, java.util.Queue<com.github.wechat.ilink.sdk.core.model.WeixinMessage>> pendingMessages
+            = new ConcurrentHashMap<>();
 
     /** 会话创建时间:sessionId -> 创建时间戳(用于未登录会话清理) */
     private final Map<String, Long> sessionCreated = new ConcurrentHashMap<>();
@@ -111,12 +120,49 @@ public class SessionManager {
     /** 移除会话:关闭客户端并清除持久化登录态 */
     public void remove(String sessionId) {
         sessionCreated.remove(sessionId);
+        pendingMessages.remove(sessionId);
         ILinkClient client = clients.remove(sessionId);
         if (client != null) {
             client.close();
             loginStateStore.remove(sessionId);
             log.info("会话已移除: {}", sessionId);
         }
+    }
+
+    /** 把消息加入会话积压队列,超过上限时丢弃最旧 */
+    private void enqueueMessages(String sessionId, List<com.github.wechat.ilink.sdk.core.model.WeixinMessage> messages) {
+        java.util.Queue<com.github.wechat.ilink.sdk.core.model.WeixinMessage> queue =
+                pendingMessages.computeIfAbsent(sessionId, k -> new java.util.concurrent.ConcurrentLinkedQueue<>());
+        synchronized (queue) {
+            if (queue.size() + messages.size() > MAX_PENDING_MESSAGES) {
+                queue.clear();
+                log.warn("会话 {} 消息积压超限,已丢弃旧消息防止内存膨胀", sessionId);
+            }
+            queue.addAll(messages);
+        }
+    }
+
+    /** 取出并清空某会话积压的消息(供前端轮询) */
+    public List<com.github.wechat.ilink.sdk.core.model.WeixinMessage> pollMessages(String sessionId) {
+        java.util.Queue<com.github.wechat.ilink.sdk.core.model.WeixinMessage> queue = pendingMessages.get(sessionId);
+        if (queue == null) {
+            return List.of();
+        }
+        List<com.github.wechat.ilink.sdk.core.model.WeixinMessage> out = new ArrayList<>();
+        com.github.wechat.ilink.sdk.core.model.WeixinMessage msg;
+        while ((msg = queue.poll()) != null) {
+            out.add(msg);
+        }
+        return out;
+    }
+
+    /** 用指定会话的 client 主动发送文本消息 */
+    public void sendText(String sessionId, String toUserId, String text) throws java.io.IOException {
+        ILinkClient client = clients.get(sessionId);
+        if (client == null) {
+            throw new IllegalArgumentException("会话不存在: " + sessionId);
+        }
+        client.sendText(toUserId, text);
     }
 
     /** 启动时用已保存的登录态恢复所有会话,免扫码 */
@@ -162,12 +208,17 @@ public class SessionManager {
                         log.error("会话 {} 登录失败: {}", sessionId, throwable.getMessage());
                     }
                 })
-                .onMessage(messages -> messages.forEach(msg -> {
-                    ILinkClient client = clients.get(sessionId);
-                    if (client != null) {
-                        handler.handleMessage(client, msg);
-                    }
-                }));
+                .onMessage(messages -> {
+                    // 消息积压:供前端 REST 轮询取走;超限丢弃最旧防内存膨胀
+                    enqueueMessages(sessionId, messages);
+                    // 同时走自动回复处理
+                    messages.forEach(msg -> {
+                        ILinkClient client = clients.get(sessionId);
+                        if (client != null) {
+                            handler.handleMessage(client, msg);
+                        }
+                    });
+                });
         if (resume != null) {
             builder.resumeContext(resume);
         }

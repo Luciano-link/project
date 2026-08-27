@@ -15,9 +15,29 @@ public class EmailTool {
     private final MailService mailService;
     private final ToolRegistry registry;
 
+    /** 每用户每日邮件发送上限,防止滥用(如批量垃圾邮件) */
+    private static final int MAX_DAILY = 20;
+
+    private static final java.util.Map<String, java.time.LocalDate> LAST_SEND_DATE = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final java.util.Map<String, Integer> DAILY_COUNT = new java.util.concurrent.ConcurrentHashMap<>();
+
     public EmailTool(MailService mailService, ToolRegistry registry) {
         this.mailService = mailService;
         this.registry = registry;
+    }
+
+    /** 按用户做每日发送上限检查(跨天重置) */
+    private boolean allowSend(String userId) {
+        String key = userId == null ? "anonymous" : userId;
+        java.time.LocalDate today = java.time.LocalDate.now();
+        java.time.LocalDate last = LAST_SEND_DATE.get(key);
+        if (last == null || !last.equals(today)) {
+            LAST_SEND_DATE.put(key, today);
+            DAILY_COUNT.put(key, 1);
+            return true;
+        }
+        int count = DAILY_COUNT.merge(key, 1, Integer::sum);
+        return count <= MAX_DAILY;
     }
 
     @PostConstruct
@@ -38,6 +58,9 @@ public class EmailTool {
                     }
                     if (content == null || content.isBlank()) {
                         return "错误:缺少邮件正文参数 content。";
+                    }
+                    if (!allowSend(ImageContext.getCurrentUserId())) {
+                        return "错误:今日发送邮件已达上限(" + MAX_DAILY + "封),请明日再试。";
                     }
                     String err = mailService.sendText(to, subject, content);
                     return err == null

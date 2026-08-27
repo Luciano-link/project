@@ -20,6 +20,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
@@ -227,6 +228,52 @@ public class WechatController {
             return unauthorized();
         }
         return ResponseEntity.ok(Map.of("route", amapRouteService.route(from, to, city)));
+    }
+
+    /** 取出并清空该会话积压的消息(前端轮询;需鉴权) */
+    @GetMapping("/session/{sessionId}/messages")
+    public ResponseEntity<?> sessionMessages(@PathVariable String sessionId, HttpServletRequest request) {
+        if (!authorized(request)) {
+            return unauthorized();
+        }
+        List<Map<String, String>> result = new java.util.ArrayList<>();
+        for (com.github.wechat.ilink.sdk.core.model.WeixinMessage msg : sessionManager.pollMessages(sessionId)) {
+            Map<String, String> item = new LinkedHashMap<>();
+            item.put("fromUserId", msg.getFrom_user_id());
+            item.put("text", extractText(msg));
+            result.add(item);
+        }
+        return ResponseEntity.ok(result);
+    }
+
+    /** 用指定会话的 client 主动发送文本消息(前端主动发送;需鉴权) */
+    @PostMapping("/session/{sessionId}/send")
+    public ResponseEntity<?> sessionSend(@PathVariable String sessionId,
+                                         @RequestParam String toUserId,
+                                         @RequestParam String text,
+                                         HttpServletRequest request) {
+        if (!authorized(request)) {
+            return unauthorized();
+        }
+        try {
+            sessionManager.sendText(sessionId, toUserId, text);
+            return ResponseEntity.ok(Map.of("success", true));
+        } catch (Exception e) {
+            return ResponseEntity.status(400).body(Map.of("error", e.getMessage()));
+        }
+    }
+
+    /** 从微信消息中提取文本内容 */
+    private String extractText(com.github.wechat.ilink.sdk.core.model.WeixinMessage msg) {
+        if (msg.getItem_list() == null) {
+            return null;
+        }
+        for (com.github.wechat.ilink.sdk.core.model.MessageItem item : msg.getItem_list()) {
+            if (item.getText_item() != null) {
+                return item.getText_item().getText();
+            }
+        }
+        return null;
     }
 
     /** 简单鉴权校验 */

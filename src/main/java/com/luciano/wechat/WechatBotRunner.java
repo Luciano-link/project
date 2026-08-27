@@ -43,6 +43,7 @@ public class WechatBotRunner {
     private final RagService ragService;
     private final UserClientRegistry userClientRegistry;
     private final com.luciano.agent.AgentRouter agentRouter;
+    private final AudioCodec audioCodec;
 
     /** 按用户分片的串行执行器:同一用户消息固定路由到同一 worker,保证顺序;跨用户并行 */
     private static final int USER_SHARDS = 8;
@@ -66,10 +67,18 @@ public class WechatBotRunner {
         }
     }
 
-    /** 按用户提交任务:同一用户串行执行,跨用户分片并行 */
+    /** 按用户提交任务:同一用户串行执行,跨用户分片并行;为每条消息生成 traceId 便于日志串联 */
     private void executeSerial(String userId, Runnable task) {
         int shard = (userId == null ? 0 : Math.abs(userId.hashCode())) % USER_SHARDS;
-        userShards.get(shard).execute(task);
+        String traceId = java.util.UUID.randomUUID().toString().substring(0, 8);
+        userShards.get(shard).execute(() -> {
+            org.slf4j.MDC.put("traceId", traceId);
+            try {
+                task.run();
+            } finally {
+                org.slf4j.MDC.remove("traceId");
+            }
+        });
     }
 
     public WechatBotRunner(LlmService llmService,
@@ -79,7 +88,8 @@ public class WechatBotRunner {
                            SkillRouter skillRouter,
                            RagService ragService,
                            UserClientRegistry userClientRegistry,
-                           com.luciano.agent.AgentRouter agentRouter) {
+                           com.luciano.agent.AgentRouter agentRouter,
+                           AudioCodec audioCodec) {
         this.llmService = llmService;
         this.ttsService = ttsService;
         this.imageService = imageService;
@@ -88,6 +98,7 @@ public class WechatBotRunner {
         this.ragService = ragService;
         this.userClientRegistry = userClientRegistry;
         this.agentRouter = agentRouter;
+        this.audioCodec = audioCodec;
     }
 
     /** 处理单条消息:按消息类型分发。先缓存图片,再处理文字,保证图文合并能匹配 */
@@ -317,6 +328,17 @@ public class WechatBotRunner {
         });
     }
 
+    /** 判断文本是否为生图意图(用于生图前给用户即时反馈) */
+    private boolean looksLikeImageRequest(String text) {
+        if (text == null) {
+            return false;
+        }
+        return (text.contains("画") || text.contains("绘") || text.contains("生成"))
+                && (text.contains("一张") || text.contains("张") || text.contains("图片")
+                || text.contains("图") || text.contains("插画") || text.contains("壁纸")
+                || text.contains("头像") || text.contains("海报"));
+    }
+
     /** 判断文本是否含明确语音指令关键词 */
     private boolean hasVoiceDirective(String text) {
         return text.contains("用语音") || text.contains("语音回复")
@@ -327,6 +349,10 @@ public class WechatBotRunner {
 
     /** 文本问答(带上下文 + 工具调用),若生图工具生成了图片则一并发送 */
     private void handleText(ILinkClient client, String toUserId, String userText) {
+        // 生图意图:先给即时反馈,避免 20~25s 静默等待
+        if (looksLikeImageRequest(userText)) {
+            safeSendText(client, toUserId, "好的,正在为你生成,请稍候~");
+        }
         long t0 = System.currentTimeMillis();
         LlmService.ChatResult chat = llmService.chatWithTrace(toUserId, userText);
         long t1 = System.currentTimeMillis();
@@ -355,7 +381,7 @@ public class WechatBotRunner {
         }
     }
 
-    /** 语音回复:LLM 生成文本 -> TTS 合成 mp3 -> 发送语音文件 */
+    /** 语音回复:LLM 生成文本 -> TTS 合成 mp3 -> 转 SILK -> 发送微信原生语音 */
     private void handleVoice(ILinkClient client, String toUserId, String userText) {
         try {
             client.startTyping(toUserId);
@@ -366,9 +392,16 @@ public class WechatBotRunner {
                 safeSendText(client, toUserId, replyText);
                 return;
             }
-            String fileName = "voice_" + UUID.randomUUID().toString().substring(0, 8) + ".mp3";
-            client.sendFile(toUserId, mp3, fileName, "语音回复");
-            log.info("语音回复已发送 {}: {}", toUserId, replyText);
+            try {
+                // 转 SILK 发微信原生语音;失败(如 ffmpeg 不可用)降级发 mp3 文件
+                byte[] silk = audioCodec.mp3ToSilk(mp3);
+                int playTimeMs = Math.max(500, silk.length / 3);
+                client.sendVoice(toUserId, silk, "voice.silk", playTimeMs, 24000);
+                log.info("语音回复已发送 {}: {}", toUserId, replyText);
+            } catch (Exception e) {
+                log.warn("语音转 SILK 失败,降级发 mp3 文件,toUserId = {}: {}", toUserId, e.getMessage());
+                client.sendFile(toUserId, mp3, "voice_" + UUID.randomUUID().toString().substring(0, 8) + ".mp3", "语音回复");
+            }
         } catch (Exception e) {
             log.error("语音回复失败,toUserId = {}", toUserId, e);
             safeSendText(client, toUserId, "抱歉,语音回复失败,请稍后再试。");

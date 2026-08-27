@@ -94,8 +94,7 @@ public class ScheduleManager {
 
     /** 周期性扫描:到达提醒时间且未提醒则推送 */
     @Scheduled(fixedDelay = 30 * 1000)
-    public void scanAndRemind() {
-        long now = System.currentTimeMillis();
+    public void scanAndRemind() {        long now = System.currentTimeMillis();
         for (ScheduleItem item : items.values()) {
             if (item.reminded || now < item.remindAt) {
                 continue;
@@ -145,6 +144,18 @@ public class ScheduleManager {
             log.info("已从 {} 恢复 {} 条日程", STORE_PATH.toAbsolutePath(), items.size());
         } catch (IOException e) {
             log.warn("读取日程失败: {}", e.getMessage());
+        }
+    }
+
+    /** 定期清理已提醒且超过 1 天的旧日程,防止 schedule.json 无限增长 */
+    @Scheduled(fixedDelay = 30 * 60 * 1000)
+    public void cleanupReminded() {
+        long now = System.currentTimeMillis();
+        boolean changed = items.entrySet().removeIf(e ->
+                e.getValue().reminded && now - e.getValue().remindAt > 24 * 60 * 60 * 1000L);
+        if (changed) {
+            save();
+            log.info("已清理 {} 条已提醒旧日程", changed ? "若干" : "0");
         }
     }
 }

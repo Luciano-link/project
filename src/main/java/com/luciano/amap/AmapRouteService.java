@@ -31,6 +31,11 @@ public class AmapRouteService {
 
     private final RestClient restClient = RestClient.builder().build();
     private final ObjectMapper objectMapper = new ObjectMapper();
+    private final AmapMcpService mcpService;
+
+    public AmapRouteService(AmapMcpService mcpService) {
+        this.mcpService = mcpService;
+    }
 
     /** 查询 from → to 的公交/地铁路线(无城市限定),返回可读摘要;失败或未配置 Key 返回错误提示 */
     public String route(String from, String to) {
@@ -39,10 +44,16 @@ public class AmapRouteService {
 
     /**
      * 查询 from → to 的公交/地铁路线,返回可读摘要。
+     * 优先走高德 MCP(如已配置专用 key),失败自动降级 Web 服务 API。
      *
      * @param city 城市名(如 上海),用于限定地理编码范围,解决同名地点歧义;可为 null
      */
     public String route(String from, String to, String city) {
+        // MCP 优先:已配置 mcp key 且调用成功则返回
+        String mcpResult = mcpService.routeViaMcp(from, to, city);
+        if (mcpResult != null) {
+            return mcpResult;
+        }
         if (amapKey == null || amapKey.isBlank()) {
             return "错误:未配置高德地图 Key,请到高德开放平台申请后配置 amap.key。";
         }

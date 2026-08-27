@@ -78,11 +78,9 @@ public class ClarifyService {
         String json = llmService.ask(EXTRACT_SYSTEM, "用户回复:" + reply);
         Map<String, String> profile = parseProfileJson(json);
         if (profile.isEmpty()) {
-            // LLM 提取失败:按默认画像兜底,避免卡死
-            log.warn("画像提取失败,按默认处理,userId = {}", userId);
-            applyDefaults(state);
-            state.setPhase(TaskState.Phase.EXECUTING);
-            return true;
+            // 完全没提取到画像信息(如用户闲聊而非回答画像):不应用默认,提示用户明确画像,避免误触发规划
+            log.info("画像提取为空,提示用户明确画像,userId = {}", userId);
+            return false;
         }
         // 只覆盖非空字段:用户分次补充画像时,已填写的值不能被 LLM 提取的空串覆盖丢失
         profile.forEach((k, v) -> {

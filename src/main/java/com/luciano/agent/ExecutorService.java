@@ -37,6 +37,15 @@ public class ExecutorService {
 
     /** 执行当前任务的全部子任务,返回最终方案文本;无任务或阶段不对返回 null */
     public String execute(String userId) {
+        return execute(userId, null);
+    }
+
+    /**
+     * 执行当前任务的全部子任务,返回最终方案文本。
+     *
+     * @param progress 步骤进度回调(可为 null),每完成一步通知用户,避免长时间无反馈
+     */
+    public String execute(String userId, java.util.function.Consumer<String> progress) {
         TaskState state = taskManager.get(userId);
         if (state == null) {
             log.warn("无可执行任务,userId = {}", userId);
@@ -67,18 +76,18 @@ public class ExecutorService {
                 continue;
             }
             if (step.contains("天气")) {
-                runWeather(state);
+                runWeather(state, progress);
             } else if (step.contains("检索")) {
-                runRetrieve(state);
+                runRetrieve(state, progress);
             } else if (step.contains("方案")) {
-                runPlan(state);
+                runPlan(state, progress);
             }
         }
         // 健壮性兜底:若拆解清单中缺失"方案生成"步骤,补生成一次,避免返回空
         String finalPlan = state.getResult("final");
         if (finalPlan == null || finalPlan.isBlank()) {
             log.warn("执行完成但缺少最终方案,补生成一次,userId = {}", userId);
-            runPlan(state);
+            runPlan(state, progress);
             finalPlan = state.getResult("final");
         }
         state.setPhase(TaskState.Phase.DONE);
@@ -87,10 +96,16 @@ public class ExecutorService {
     }
 
     /** 子任务:查询目的地天气 */
-    private void runWeather(TaskState state) {
+    private void runWeather(TaskState state, java.util.function.Consumer<String> progress) {
+        if (progress != null) {
+            progress.accept("正在查询" + state.getResult("city") + "天气...");
+        }
         try {
             String weather = weatherService.getWeatherNow(state.getResult("city"));
             state.setResult("weather", weather);
+            if (progress != null) {
+                progress.accept("✓ 天气已获取");
+            }
             log.info("天气查询完成: {}", weather);
         } catch (Exception e) {
             log.error("天气查询失败", e);
@@ -99,7 +114,10 @@ public class ExecutorService {
     }
 
     /** 子任务:检索目的地景点/美食/住宿知识(知识库未覆盖的城市返回空,由 LLM 搜索兜底) */
-    private void runRetrieve(TaskState state) {
+    private void runRetrieve(TaskState state, java.util.function.Consumer<String> progress) {
+        if (progress != null) {
+            progress.accept("正在检索景点/美食/住宿信息...");
+        }
         try {
             String city = state.getResult("city");
             StringBuilder sb = new StringBuilder();
@@ -107,6 +125,9 @@ public class ExecutorService {
             appendIfPresent(sb, "美食", ragService.retrieve(city + "美食"));
             appendIfPresent(sb, "住宿", ragService.retrieve(city + "住宿"));
             state.setResult("knowledge", sb.length() == 0 ? "知识库未覆盖该城市,请联网搜索" : sb.toString());
+            if (progress != null) {
+                progress.accept("✓ 信息检索完成");
+            }
             log.info("知识检索完成,命中 = {}", sb.length() > 0);
         } catch (Exception e) {
             log.error("知识检索失败", e);
@@ -115,7 +136,10 @@ public class ExecutorService {
     }
 
     /** 子任务:生成最终方案(LLM 综合天气/知识/画像,开启联网搜索兜底任意城市) */
-    private void runPlan(TaskState state) {
+    private void runPlan(TaskState state, java.util.function.Consumer<String> progress) {
+        if (progress != null) {
+            progress.accept("正在生成完整方案,请稍候...");
+        }
         try {
             String material = "【目的地】" + nullSafe(state.getResult("city"))
                     + nullSafe(state.getResult("days"))

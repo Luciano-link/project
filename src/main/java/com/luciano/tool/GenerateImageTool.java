@@ -19,11 +19,25 @@ public class GenerateImageTool {
 
     private static final Logger log = LoggerFactory.getLogger(GenerateImageTool.class);
 
-    /** 图片生成结果的临时缓存:userId -> 图片字节列表(一轮可生成多张) */
-    private static final ConcurrentHashMap<String, java.util.List<byte[]>> PENDING_IMAGES = new ConcurrentHashMap<>();
+    /** 待发送图片缓存条目:图片列表 + 最近写入时间 */
+    private record PendingEntry(java.util.List<byte[]> images, long timestamp) {
+    }
+
+    /** 图片生成结果的临时缓存:userId -> 待发送图片条目 */
+    private static final ConcurrentHashMap<String, PendingEntry> PENDING_IMAGES = new ConcurrentHashMap<>();
 
     /** 待发送图片缓存上限,防止异常场景下内存膨胀 */
     private static final int MAX_PENDING = 100;
+
+    /** 缓存图片超过该时长未发送则视为滞留,定期清理 */
+    private static final long IMAGE_TTL_MS = 5 * 60 * 1000L;
+
+    /** 定期清理超过 5 分钟未发送的缓存图片,防止生成后未发送导致的内存滞留 */
+    @org.springframework.scheduling.annotation.Scheduled(fixedDelay = 60 * 1000)
+    public void cleanupExpiredImages() {
+        long now = System.currentTimeMillis();
+        PENDING_IMAGES.entrySet().removeIf(e -> now - e.getValue().timestamp() > IMAGE_TTL_MS);
+    }
 
     private final ImageService imageService;
     private final ToolRegistry registry;
@@ -64,14 +78,20 @@ public class GenerateImageTool {
                 log.warn("待发送图片缓存达到上限,已丢弃用户 {} 的图片", oldestKey);
             }
             // 多张图追加到同一用户的列表,避免并行生图时互相覆盖
-            PENDING_IMAGES.computeIfAbsent(userId, k -> new java.util.concurrent.CopyOnWriteArrayList<>()).add(imageBytes);
+            PENDING_IMAGES.compute(userId, (k, entry) -> {
+                java.util.List<byte[]> list = entry == null
+                        ? new java.util.concurrent.CopyOnWriteArrayList<>() : entry.images();
+                list.add(imageBytes);
+                return new PendingEntry(list, System.currentTimeMillis());
+            });
         }
         return "图片生成成功。请结合此前对话内容(如已查询的天气、用户的需求),用一句完整的中文总结图片内容并告知用户图片已生成。";
     }
 
     /** 获取并清除指定用户的全部待发送图片 */
     public static java.util.List<byte[]> takePendingImages(String userId) {
-        return userId == null ? null : PENDING_IMAGES.remove(userId);
+        PendingEntry entry = userId == null ? null : PENDING_IMAGES.remove(userId);
+        return entry == null ? null : entry.images();
     }
 
     /** 构造 JSON Schema 描述 generate_image 的参数 */

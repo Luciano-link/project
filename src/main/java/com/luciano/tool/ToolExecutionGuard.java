@@ -31,8 +31,8 @@ public final class ToolExecutionGuard {
     /** 工具名 -> 最近执行时间戳列表 */
     private static final ConcurrentHashMap<String, java.util.Deque<Long>> CALL_HISTORY = new ConcurrentHashMap<>();
 
-    /** 工具执行专用线程池:避免慢工具(生图等)占满公共池影响其他异步任务 */
-    private static final ExecutorService TOOL_POOL = Executors.newFixedThreadPool(8);
+    /** 工具执行专用线程池:避免慢工具(生图等)占满公共池影响其他异步任务;16 线程缓解并发生图时的线程饥饿 */
+    private static final ExecutorService TOOL_POOL = Executors.newFixedThreadPool(16);
 
     private ToolExecutionGuard() {
     }

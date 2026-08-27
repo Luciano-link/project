@@ -41,6 +41,8 @@ public class WechatBotRunner {
     private final com.luciano.conversation.ConversationService conversationService;
     private final SkillRouter skillRouter;
     private final RagService ragService;
+    private final UserClientRegistry userClientRegistry;
+    private final com.luciano.agent.AgentRouter agentRouter;
 
     /** 按用户分片的串行执行器:同一用户消息固定路由到同一 worker,保证顺序;跨用户并行 */
     private static final int USER_SHARDS = 8;
@@ -75,13 +77,17 @@ public class WechatBotRunner {
                            ImageService imageService,
                            com.luciano.conversation.ConversationService conversationService,
                            SkillRouter skillRouter,
-                           RagService ragService) {
+                           RagService ragService,
+                           UserClientRegistry userClientRegistry,
+                           com.luciano.agent.AgentRouter agentRouter) {
         this.llmService = llmService;
         this.ttsService = ttsService;
         this.imageService = imageService;
         this.conversationService = conversationService;
         this.skillRouter = skillRouter;
         this.ragService = ragService;
+        this.userClientRegistry = userClientRegistry;
+        this.agentRouter = agentRouter;
     }
 
     /** 处理单条消息:按消息类型分发。先缓存图片,再处理文字,保证图文合并能匹配 */
@@ -90,6 +96,8 @@ public class WechatBotRunner {
             return;
         }
         String fromUser = msg.getFrom_user_id();
+        // 登记用户与当前会话客户端,供日程提醒等主动推送定位
+        userClientRegistry.bind(fromUser, client);
         List<MessageItem> items = msg.getItem_list();
         // 第一遍:先下载缓存图片,确保文字消息检查待合并图片时已就绪
         for (MessageItem item : items) {
@@ -146,12 +154,28 @@ public class WechatBotRunner {
         routeText(client, fromUser, userText);
     }
 
-    /** 纯文本三层路由:Skill 命中直接执行 → RAG 命中增强 Prompt → 否则 LLM 兜底 */
+    /** 纯文本三层路由:Skill 命中直接执行 → Agent 规划任务 → RAG 增强 → LLM 兜底 */
     private void routeText(ILinkClient client, String toUserId, String userText) {
         Skill skill = skillRouter.match(userText);
         if (skill != null) {
             log.info("[Skill] {} 命中技能 {},跳过 LLM", toUserId, skill.name());
             safeSendText(client, toUserId, skill.execute(toUserId, userText));
+            return;
+        }
+        // Agent 路由:规划类目标或进行中任务的澄清回复
+        if (agentRouter.shouldHandle(toUserId, userText)) {
+            log.info("[Agent] {} 接管消息,userId = {}", toUserId, userText);
+            executeSerial(toUserId, () -> {
+                com.luciano.agent.AgentRouter.AgentResponse resp = agentRouter.handle(toUserId, userText,
+                        t -> safeSendText(client, toUserId, t));
+                if (resp != null) {
+                    safeSendText(client, toUserId, resp.immediateReply());
+                    if (resp.asyncPlan() != null) {
+                        String plan = resp.asyncPlan().get();
+                        safeSendText(client, toUserId, plan);
+                    }
+                }
+            });
             return;
         }
         String knowledge = ragService.retrieve(userText);
@@ -206,6 +230,8 @@ public class WechatBotRunner {
             String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
             String imageId = ImagePendingStore.put(fromUser, imageBytes, fileName);
             log.info("图片已缓存,fromUser = {}, imageId = {}", fromUser, imageId);
+            // 立即反馈,避免识别期间(10~30s)用户静默等待
+            safeSendText(client, fromUser, "收到图片,正在识别,请稍候~");
 
             // 先发文字后发图:图片到达时检查是否有待合并文字,有则图文合并
             ImagePendingStore.PendingText pendingText = ImagePendingStore.takeText(fromUser);

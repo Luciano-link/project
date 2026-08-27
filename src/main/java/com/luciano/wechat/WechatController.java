@@ -44,6 +44,7 @@ public class WechatController {
     private final com.luciano.agent.PlannerService plannerService;
     private final com.luciano.agent.ExecutorService executorService;
     private final com.luciano.amap.AmapRouteService amapRouteService;
+    private final com.luciano.agent.AgentRouter agentRouter;
 
     public WechatController(SessionManager sessionManager, SecurityProperties securityProperties,
                             SkillRouter skillRouter, RagService ragService,
@@ -51,7 +52,8 @@ public class WechatController {
                             com.luciano.agent.TaskStateManager taskStateManager,
                             com.luciano.agent.PlannerService plannerService,
                             com.luciano.agent.ExecutorService executorService,
-                            com.luciano.amap.AmapRouteService amapRouteService) {
+                            com.luciano.amap.AmapRouteService amapRouteService,
+                            com.luciano.agent.AgentRouter agentRouter) {
         this.sessionManager = sessionManager;
         this.securityProperties = securityProperties;
         this.skillRouter = skillRouter;
@@ -61,6 +63,7 @@ public class WechatController {
         this.plannerService = plannerService;
         this.executorService = executorService;
         this.amapRouteService = amapRouteService;
+        this.agentRouter = agentRouter;
     }
 
     /** 创建会话:分配专属 client 并返回登录二维码(需鉴权) */
@@ -137,6 +140,12 @@ public class WechatController {
             log.info("[route-debug] 命中 skill = {}, text = {}", skill.name(), text);
             return ResponseEntity.ok(Map.of("hit", "skill", "skill", skill.name(),
                     "reply", skill.execute(uid, text)));
+        }
+        // Agent 路由:规划类目标或进行中任务的澄清回复
+        if (agentRouter.shouldHandle(uid, text)) {
+            log.info("[route-debug] Agent 接管, text = {}", text);
+            String reply = agentRouter.process(uid, text);
+            return ResponseEntity.ok(Map.of("hit", "agent", "reply", reply));
         }
         String knowledge = ragService.retrieve(text);
         if (knowledge != null) {

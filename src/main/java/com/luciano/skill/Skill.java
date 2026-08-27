@@ -15,4 +15,9 @@ public interface Skill {
 
     /** 执行技能,返回回复文本 */
     String execute(String userId, String text);
+
+    /** 匹配优先级,数值大优先(多个技能触发词可能重叠时用于控制顺序),默认 0 */
+    default int priority() {
+        return 0;
+    }
 }

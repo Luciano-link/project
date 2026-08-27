@@ -146,7 +146,9 @@ public class ExecutorService {
                     + "\n【天气】" + nullSafe(state.getResult("weather"))
                     + "\n【参考知识】" + nullSafe(state.getResult("knowledge"))
                     + "\n【用户画像】" + buildProfileText(state);
-            String finalPlan = llmService.ask(planSystem(state), material, true);
+            // 知识库覆盖的城市不用联网搜索(速度快);未覆盖的才开搜索兜底
+            boolean needSearch = !hasKnowledge(state);
+            String finalPlan = llmService.ask(planSystem(state), material, needSearch);
             state.setResult("final", finalPlan);
             log.info("方案生成完成,长度 = {}", finalPlan == null ? 0 : finalPlan.length());
         } catch (Exception e) {
@@ -155,7 +157,7 @@ public class ExecutorService {
         }
     }
 
-    /** 方案生成系统提示词:目的地城市/天数动态注入,并明确 RAG 未覆盖时用自身知识兜底 */
+    /** 方案生成系统提示词:目的地城市/天数动态注入,限定字数避免超长输出拖慢响应 */
     private String planSystem(TaskState state) {
         return "你是资深旅行规划师。请基于以下素材,结合用户画像,生成一份完整的" + nullSafe(state.getResult("city"))
                 + nullSafe(state.getResult("days")) + "游出行方案:\n"
@@ -164,8 +166,15 @@ public class ExecutorService {
                 + "2. 包含美食推荐、住宿建议、出行注意事项;\n"
                 + "3. 结合用户画像定制(预算/偏好/人数);\n"
                 + "4. 排版清晰,用标题分段;\n"
-                + "5. 若【参考知识】为空或未覆盖目的地,请基于自身知识规划,可联网核实。\n"
+                + "5. 若【参考知识】为空或未覆盖目的地,请基于自身知识规划,可联网核实;\n"
+                + "6. 方案精炼完整、重点突出,【总字数控制在1200字以内】。\n"
                 + "直接输出完整方案。";
+    }
+
+    /** 知识库是否覆盖了目的地(覆盖则无需联网搜索,避免无谓延迟) */
+    private boolean hasKnowledge(TaskState state) {
+        String knowledge = state.getResult("knowledge");
+        return knowledge != null && !knowledge.contains("未覆盖") && !knowledge.contains("检索失败");
     }
 
     /** 从用户目标中提取城市,未匹配到已知城市时默认上海 */

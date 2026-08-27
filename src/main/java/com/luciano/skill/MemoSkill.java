@@ -32,7 +32,7 @@ public class MemoSkill implements Skill {
 
     private static final Path STORE_PATH = Paths.get("memo.json");
 
-    private static final List<String> ADD_WORDS = List.of("记一下", "帮我记", "添加待办", "加个待办", "记住", "记录一下");
+    private static final List<String> ADD_WORDS = List.of("记一下", "帮我记", "添加待办", "加个待办", "记住", "记录一下", "记录:", "记录");
     private static final List<String> DEL_WORDS = List.of("删除待办", "删掉待办", "完成待办", "划掉");
     private static final List<String> QUERY_WORDS = List.of("我的待办", "待办", "备忘录", "清单");
 

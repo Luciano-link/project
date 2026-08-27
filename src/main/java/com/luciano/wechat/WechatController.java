@@ -3,6 +3,7 @@ package com.luciano.wechat;
 import com.github.wechat.ilink.sdk.core.login.LoginContext;
 import com.github.wechat.ilink.sdk.core.login.LoginStatus;
 import com.luciano.config.SecurityProperties;
+import com.luciano.agent.AgentTaskDetector;
 import com.luciano.rag.RagService;
 import com.luciano.skill.Skill;
 import com.luciano.skill.SkillRouter;
@@ -117,6 +118,9 @@ public class WechatController {
             return unauthorized();
         }
         String uid = (userId == null || userId.isBlank()) ? "debug" : userId;
+        if (AgentTaskDetector.isAgentTask(text)) {
+            return ResponseEntity.ok(Map.of("hit", "agent", "message", "将走自主规划 Agent(Planner→Executor→汇总)"));
+        }
         Skill skill = skillRouter.match(text);
         if (skill != null) {
             log.info("[route-debug] 命中 skill = {}, text = {}", skill.name(), text);

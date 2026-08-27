@@ -6,6 +6,8 @@ import com.github.wechat.ilink.sdk.core.model.WeixinMessage;
 import com.luciano.llm.ImageService;
 import com.luciano.llm.LlmService;
 import com.luciano.llm.TtsService;
+import com.luciano.agent.AgentRouter;
+import com.luciano.agent.AgentTaskDetector;
 import com.luciano.rag.RagService;
 import com.luciano.skill.Skill;
 import com.luciano.skill.SkillRouter;
@@ -40,6 +42,7 @@ public class WechatBotRunner {
     private final com.luciano.conversation.ConversationService conversationService;
     private final SkillRouter skillRouter;
     private final RagService ragService;
+    private final AgentRouter agentRouter;
 
     /** 有界线程池:核心 4,最大 16,队列 200,防止恶意消息耗尽资源 */
     private final ThreadPoolExecutor replyExecutor = new ThreadPoolExecutor(
@@ -57,13 +60,15 @@ public class WechatBotRunner {
                            ImageService imageService,
                            com.luciano.conversation.ConversationService conversationService,
                            SkillRouter skillRouter,
-                           RagService ragService) {
+                           RagService ragService,
+                           AgentRouter agentRouter) {
         this.llmService = llmService;
         this.ttsService = ttsService;
         this.imageService = imageService;
         this.conversationService = conversationService;
         this.skillRouter = skillRouter;
         this.ragService = ragService;
+        this.agentRouter = agentRouter;
     }
 
     /** 处理单条消息:按消息类型分发。先缓存图片,再处理文字,保证图文合并能匹配 */
@@ -128,8 +133,13 @@ public class WechatBotRunner {
         routeText(client, fromUser, userText);
     }
 
-    /** 纯文本三层路由:Skill 命中直接执行 → RAG 命中增强 Prompt → 否则 LLM 兜底 */
+    /** 纯文本路由:Agent 长任务 → Skill → RAG → LLM 兜底 */
     private void routeText(ILinkClient client, String toUserId, String userText) {
+        if (AgentTaskDetector.isAgentTask(userText) && agentRouter.isEnabled()) {
+            log.info("[Agent] {} 识别为长任务,走自主规划", toUserId);
+            handleAgentTask(client, toUserId, userText);
+            return;
+        }
         Skill skill = skillRouter.match(userText);
         if (skill != null) {
             log.info("[Skill] {} 命中技能 {},跳过 LLM", toUserId, skill.name());
@@ -143,6 +153,50 @@ public class WechatBotRunner {
             return;
         }
         dispatchByIntent(client, toUserId, userText);
+    }
+
+    /** Agent 长任务:规划 → 分步执行 → 汇总成品 */
+    private void handleAgentTask(ILinkClient client, String toUserId, String userText) {
+        // 同步立即回复,避免线程池排队时用户长时间无反馈
+        safeSendText(client, toUserId, "正在规划中，请稍候…");
+        replyExecutor.execute(() -> {
+            try {
+                client.startTyping(toUserId);
+                AgentRouter.AgentResult result = agentRouter.run(toUserId, userText, progress -> {
+                    String message = switch (progress.phase()) {
+                        case PLANNING -> "正在拆解出行子任务…";
+                        case SYNTHESIZING -> "正在汇总完整出行方案…";
+                        case STEP -> "▶ 步骤 " + progress.index() + "/" + progress.total()
+                                + ": " + progress.title();
+                    };
+                    safeSendText(client, toUserId, message);
+                });
+                if (result.type() == AgentRouter.AgentResult.Type.CLARIFY) {
+                    safeSendText(client, toUserId, result.message());
+                    return;
+                }
+                safeSendText(client, toUserId, result.message());
+                sendPendingImages(client, toUserId);
+            } catch (Exception e) {
+                log.error("[Agent] 处理异常,toUserId = {}", toUserId, e);
+                safeSendText(client, toUserId, "抱歉,自主规划失败,请稍后再试。");
+            }
+        });
+    }
+
+    private void sendPendingImages(ILinkClient client, String toUserId) {
+        List<byte[]> pendingImages = GenerateImageTool.takePendingImages(toUserId);
+        if (pendingImages == null) {
+            return;
+        }
+        for (byte[] pendingImage : pendingImages) {
+            String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
+            try {
+                client.sendImage(toUserId, pendingImage, fileName, "为你生成的图片");
+            } catch (IOException e) {
+                log.error("Agent 生图发送失败,toUserId = {}", toUserId, e);
+            }
+        }
     }
 
     /** 命中 RAG:把知识库内容注入 Prompt 后走 LLM */
@@ -290,18 +344,7 @@ public class WechatBotRunner {
         log.info("LLM 回复 {}: {}", toUserId, reply);
         safeSendText(client, toUserId, reply);
         log.info("[{}] 发送用户耗时 {}ms,userId = {}", now(), System.currentTimeMillis() - t1, toUserId);
-        List<byte[]> pendingImages = GenerateImageTool.takePendingImages(toUserId);
-        if (pendingImages != null) {
-            for (byte[] pendingImage : pendingImages) {
-                String fileName = "image_" + UUID.randomUUID().toString().substring(0, 8) + ".png";
-                try {
-                    client.sendImage(toUserId, pendingImage, fileName, "为你生成的图片");
-                    log.info("工具生成的图片已发送 {}: {}", toUserId, fileName);
-                } catch (IOException e) {
-                    log.error("工具生成的图片发送失败,toUserId = {}", toUserId, e);
-                }
-            }
-        }
+        sendPendingImages(client, toUserId);
     }
 
     /** 语音回复:LLM 生成文本 -> TTS 合成 mp3 -> 发送语音文件 */

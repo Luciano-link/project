@@ -34,7 +34,12 @@ public class MemoSkill implements Skill {
 
     private static final List<String> ADD_WORDS = List.of("记一下", "帮我记", "添加待办", "加个待办", "记住", "记录一下");
     private static final List<String> DEL_WORDS = List.of("删除待办", "删掉待办", "完成待办", "划掉");
-    private static final List<String> QUERY_WORDS = List.of("我的待办", "待办", "备忘录", "清单");
+    /** 查询触发词需尽量具体,避免与出行「打包清单」等场景冲突 */
+    private static final List<String> QUERY_WORDS = List.of("我的待办", "查看待办", "我的备忘录", "我的清单", "备忘录");
+
+    /** 出现这些词时视为出行/规划场景,仅响应明确的增删操作,不抢 RAG 路由 */
+    private static final List<String> TRAVEL_CONTEXT = List.of(
+            "旅行", "出行", "旅游", "三日游", "攻略", "行程", "景点", "酒店", "机票", "车票", "规划", "方案");
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Map<String, List<String>> memos = new ConcurrentHashMap<>();
@@ -51,7 +56,14 @@ public class MemoSkill implements Skill {
 
     @Override
     public boolean match(String text) {
-        return containsAny(text, ADD_WORDS) || containsAny(text, DEL_WORDS) || containsAny(text, QUERY_WORDS);
+        if (text == null || text.isBlank()) {
+            return false;
+        }
+        boolean addOrDel = containsAny(text, ADD_WORDS) || containsAny(text, DEL_WORDS);
+        if (isTravelContext(text)) {
+            return addOrDel;
+        }
+        return addOrDel || containsAny(text, QUERY_WORDS);
     }
 
     @Override
@@ -139,6 +151,10 @@ public class MemoSkill implements Skill {
             }
         }
         return false;
+    }
+
+    private boolean isTravelContext(String text) {
+        return containsAny(text, TRAVEL_CONTEXT);
     }
 
     private synchronized void save() {

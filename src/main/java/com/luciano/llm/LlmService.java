@@ -51,6 +51,9 @@ public class LlmService {
     /** Function Calling 最大工具调用轮次,防止死循环 */
     private static final int MAX_TOOL_ROUNDS = 3;
 
+    /** Agent 子任务执行时的工具调用轮次上限(可多于普通聊天) */
+    private static final int MAX_AGENT_TOOL_ROUNDS = 5;
+
     /** 摘要压缩线程池:异步生成摘要,不阻塞用户请求 */
     private final ExecutorService summaryExecutor = Executors.newFixedThreadPool(2);
 
@@ -161,6 +164,78 @@ public class LlmService {
     /** 兼容无上下文/无工具调用 */
     public String chat(String userText) {
         return chat("__anonymous__", userText);
+    }
+
+    /**
+     * Agent 规划/汇总:单次生成,不写入对话历史,不启用工具(保证 JSON/长文稳定)。
+     */
+    public String agentGenerate(String systemPrompt, String userMessage) {
+        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
+            return null;
+        }
+        try {
+            List<Message> messages = List.of(
+                    Message.builder().role(Role.SYSTEM.getValue()).content(systemPrompt).build(),
+                    Message.builder().role(Role.USER.getValue()).content(userMessage).build());
+            GenerationParam param = GenerationParam.builder()
+                    .model(properties.getModel())
+                    .messages(messages)
+                    .enableSearch(false)
+                    .build();
+            GenerationResult result = callGeneration(param);
+            return extractText(result);
+        } catch (Exception e) {
+            log.error("Agent 文本生成失败", e);
+            return null;
+        }
+    }
+
+    /**
+     * Agent 子任务执行:单次生成,不写入对话历史,可启用工具与联网搜索。
+     */
+    public ChatResult agentStep(String userId, String systemPrompt, String userMessage, String knowledge) {
+        if (properties.getApiKey() == null || properties.getApiKey().isBlank()) {
+            return new ChatResult("大模型未配置,无法执行子任务。", List.of());
+        }
+        List<ToolStep> steps = new ArrayList<>();
+        try {
+            List<Message> messages = buildAgentMessages(systemPrompt, userMessage, knowledge);
+            GenerationParam param = buildParam(messages);
+            GenerationResult result = callGeneration(param);
+
+            int toolRound = 0;
+            while (hasToolCalls(result) && toolRound < MAX_AGENT_TOOL_ROUNDS) {
+                toolRound++;
+                ImageContext.setCurrentUserId(userId);
+                try {
+                    appendAssistantToolCall(messages, result);
+                    executeToolCalls(messages, result, steps);
+                    result = callGeneration(buildParam(messages));
+                } finally {
+                    ImageContext.clear();
+                }
+            }
+
+            String text = extractText(result);
+            if (text == null || text.isBlank()) {
+                return new ChatResult("子任务未返回有效内容。", steps);
+            }
+            return new ChatResult(text, steps);
+        } catch (Exception e) {
+            log.error("Agent 子任务执行失败,userId = {}", userId, e);
+            return new ChatResult("子任务执行失败:" + e.getMessage(), steps);
+        }
+    }
+
+    private List<Message> buildAgentMessages(String systemPrompt, String userMessage, String knowledge) {
+        List<Message> messages = new ArrayList<>();
+        messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(systemPrompt).build());
+        if (knowledge != null && !knowledge.isBlank()) {
+            messages.add(Message.builder().role(Role.SYSTEM.getValue())
+                    .content("知识库参考(通用框架优先,城市不符段落忽略):\n" + knowledge).build());
+        }
+        messages.add(Message.builder().role(Role.USER.getValue()).content(userMessage).build());
+        return messages;
     }
 
     /** 组装带上下文的消息列表 */

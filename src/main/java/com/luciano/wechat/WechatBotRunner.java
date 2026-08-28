@@ -43,7 +43,6 @@ public class WechatBotRunner {
     private final RagService ragService;
     private final UserClientRegistry userClientRegistry;
     private final com.luciano.agent.AgentRouter agentRouter;
-    private final AudioCodec audioCodec;
 
     /** 按用户分片的串行执行器:同一用户消息固定路由到同一 worker,保证顺序;跨用户并行 */
     private static final int USER_SHARDS = 8;
@@ -86,10 +85,9 @@ public class WechatBotRunner {
                            ImageService imageService,
                            com.luciano.conversation.ConversationService conversationService,
                            SkillRouter skillRouter,
-                           RagService ragService,
-                           UserClientRegistry userClientRegistry,
-                           com.luciano.agent.AgentRouter agentRouter,
-                           AudioCodec audioCodec) {
+                            RagService ragService,
+                            UserClientRegistry userClientRegistry,
+                            com.luciano.agent.AgentRouter agentRouter) {
         this.llmService = llmService;
         this.ttsService = ttsService;
         this.imageService = imageService;
@@ -98,7 +96,6 @@ public class WechatBotRunner {
         this.ragService = ragService;
         this.userClientRegistry = userClientRegistry;
         this.agentRouter = agentRouter;
-        this.audioCodec = audioCodec;
     }
 
     /** 处理单条消息:按消息类型分发。先缓存图片,再处理文字,保证图文合并能匹配 */
@@ -165,26 +162,46 @@ public class WechatBotRunner {
         routeText(client, fromUser, userText);
     }
 
+    /** 发送技能生成的 PDF 文件(如 SendPdfSkill 生成后暂存) */
+    private void sendGeneratedPdf(ILinkClient client, String toUserId) {
+        byte[] pdf = PdfResultStore.take(toUserId);
+        if (pdf == null) {
+            return;
+        }
+        try {
+            client.sendFile(toUserId, pdf, "出行方案_" + UUID.randomUUID().toString().substring(0, 8) + ".pdf", "出行方案PDF");
+            log.info("PDF 已发送 {}: {} bytes", toUserId, pdf.length);
+        } catch (IOException e) {
+            log.error("PDF 发送失败,toUserId = {}", toUserId, e);
+        }
+    }
+
     /** 纯文本三层路由:Skill 命中直接执行 → Agent 规划任务 → RAG 增强 → LLM 兜底 */
     private void routeText(ILinkClient client, String toUserId, String userText) {
         Skill skill = skillRouter.match(userText);
         if (skill != null) {
             log.info("[Skill] {} 命中技能 {},跳过 LLM", toUserId, skill.name());
             safeSendText(client, toUserId, skill.execute(toUserId, userText));
+            sendGeneratedPdf(client, toUserId);
             return;
         }
         // Agent 路由:规划类目标或进行中任务的澄清回复
         if (agentRouter.shouldHandle(toUserId, userText)) {
             log.info("[Agent] {} 接管消息,userId = {}", toUserId, userText);
             executeSerial(toUserId, () -> {
-                com.luciano.agent.AgentRouter.AgentResponse resp = agentRouter.handle(toUserId, userText,
-                        t -> safeSendText(client, toUserId, t));
-                if (resp != null) {
-                    safeSendText(client, toUserId, resp.immediateReply());
-                    if (resp.asyncPlan() != null) {
-                        String plan = resp.asyncPlan().get();
-                        safeSendText(client, toUserId, plan);
+                try {
+                    com.luciano.agent.AgentRouter.AgentResponse resp = agentRouter.handle(toUserId, userText,
+                            t -> safeSendText(client, toUserId, t));
+                    if (resp != null) {
+                        safeSendText(client, toUserId, resp.immediateReply());
+                        if (resp.asyncPlan() != null) {
+                            String plan = resp.asyncPlan().get();
+                            safeSendText(client, toUserId, plan);
+                        }
                     }
+                } catch (Exception e) {
+                    log.error("Agent 处理异常,toUserId = {}", toUserId, e);
+                    safeSendText(client, toUserId, "抱歉,处理你的规划请求时出错了,请稍后再试。");
                 }
             });
             return;
@@ -381,11 +398,25 @@ public class WechatBotRunner {
         }
     }
 
-    /** 语音回复:LLM 生成文本 -> TTS 合成 mp3 -> 转 SILK -> 发送微信原生语音 */
+    /** 语音播报专用 prompt:要求简短口语化,避免 TTS 朗读超长 markdown 文本 */
+    private static final String VOICE_SYSTEM = "你是微信语音助手。请用简短、口语化的中文直接回答用户问题,"
+            + "总字数控制在60字以内,适合语音播报。不要使用 markdown、emoji、列表或任何特殊符号,直接说内容。";
+
+    /** 语音回复:先走 LLM 工具链查真实信息(如天气),再口语化播报 -> TTS -> mp3 文件 */
     private void handleVoice(ILinkClient client, String toUserId, String userText) {
         try {
-            client.startTyping(toUserId);
-            String replyText = llmService.chat(toUserId, userText);
+            // 先查真实信息(带工具,LLM 会调 get_weather 等),避免凭知识编造
+            LlmService.ChatResult result = llmService.chatWithTrace(toUserId, userText);
+            String answer = result.reply();
+            // 口语化简短播报
+            String replyText = llmService.ask(VOICE_SYSTEM, "请用口语化简短播报以下内容: " + answer, false);
+            if (replyText == null || replyText.isBlank()) {
+                replyText = answer;
+            }
+            // 超长截断:防止 TTS 合成过长音频
+            if (replyText.length() > 150) {
+                replyText = replyText.substring(0, 150) + "。";
+            }
             byte[] mp3 = ttsService.synthesize(replyText);
             if (mp3 == null) {
                 log.warn("语音合成失败,改发文本,toUserId = {}", toUserId);
@@ -393,14 +424,11 @@ public class WechatBotRunner {
                 return;
             }
             try {
-                // 转 SILK 发微信原生语音;失败(如 ffmpeg 不可用)降级发 mp3 文件
-                byte[] silk = audioCodec.mp3ToSilk(mp3);
-                int playTimeMs = Math.max(500, silk.length / 3);
-                client.sendVoice(toUserId, silk, "voice.silk", playTimeMs, 24000);
-                log.info("语音回复已发送 {}: {}", toUserId, replyText);
-            } catch (Exception e) {
-                log.warn("语音转 SILK 失败,降级发 mp3 文件,toUserId = {}: {}", toUserId, e.getMessage());
                 client.sendFile(toUserId, mp3, "voice_" + UUID.randomUUID().toString().substring(0, 8) + ".mp3", "语音回复");
+                log.info("语音回复已发送(文件) {}: {}", toUserId, replyText);
+            } catch (Exception e) {
+                log.error("语音文件发送失败,toUserId = {}", toUserId, e);
+                safeSendText(client, toUserId, replyText);
             }
         } catch (Exception e) {
             log.error("语音回复失败,toUserId = {}", toUserId, e);

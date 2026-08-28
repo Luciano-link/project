@@ -40,7 +40,9 @@ public class LlmService {
     private static final Logger log = LoggerFactory.getLogger(LlmService.class);
 
     private static final String SYSTEM_PROMPT = "你是一个友好、乐于助人的微信机器人助手,回答要简洁准确,使用中文。"
-            + "调用规则:查询天气/生成图片/发送邮件时调用对应工具;"
+            + "调用规则:查询天气/生成图片/发送邮件/查询路线/计算/单位换算时调用对应工具;"
+            + "【重要】用户明确要求画/生成/制作图片时,必须调用 generate_image 工具生成真实图片,"
+            + "禁止在不调用工具的情况下声称\"图片已生成\"或自行描述一张不存在的图片;"
             + "需要最新资讯、新闻、实时数据时使用联网搜索;"
             + "普通聊天直接回答。多步任务请按顺序调用工具,后一步参数使用前一步的真实结果。";
 
@@ -169,6 +171,13 @@ public class LlmService {
         }
     }
 
+    /** 当前时间提示:注入所有 LLM 调用,防止模型编造时间戳(如天气实况时间) */
+    private String nowHint() {
+        return "【当前日期时间】" + java.time.LocalDateTime.now()
+                .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm"))
+                + "(实时数据请以此为准,勿编造时间戳)";
+    }
+
     /** 兼容无上下文/无工具调用 */
     public String chat(String userText) {
         return chat("__anonymous__", userText);
@@ -198,6 +207,8 @@ public class LlmService {
         try {
             List<Message> messages = new ArrayList<>();
             messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(systemPrompt).build());
+            // 注入真实当前时间,防止 Agent/工具场景 LLM 编造时间戳
+            messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(nowHint()).build());
             messages.add(Message.builder().role(Role.USER.getValue()).content(userText).build());
             GenerationParam param = GenerationParam.builder()
                     .model(properties.getModel())
@@ -220,6 +231,8 @@ public class LlmService {
                     .content("以下是更早对话的摘要,供参考:\n" + summary).build());
         }
         messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(SYSTEM_PROMPT).build());
+        // 注入真实当前时间,防止 LLM 编造时间戳(如天气实况时间)
+        messages.add(Message.builder().role(Role.SYSTEM.getValue()).content(nowHint()).build());
         messages.addAll(conversationService.getMessages(userId));
         if (knowledge != null && !knowledge.isBlank()) {
             messages.add(Message.builder().role(Role.SYSTEM.getValue())

@@ -1,5 +1,7 @@
 package com.luciano.agent;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -29,6 +31,10 @@ public class TaskState {
     private final Map<String, String> profile = new ConcurrentHashMap<>();
     /** 中间结果:天气/检索/最终方案等(按 key 存取) */
     private final Map<String, String> results = new ConcurrentHashMap<>();
+    /** 规划出的结构化子任务 */
+    private List<SubTask> subtasks = List.of();
+    /** 各子任务执行结果 */
+    private final List<StepResult> stepResults = new ArrayList<>();
 
     public TaskState(String userId, String goal) {
         this.userId = userId;
@@ -78,5 +84,29 @@ public class TaskState {
 
     public Map<String, String> getResults() {
         return results;
+    }
+
+    public List<SubTask> getSubtasks() {
+        return subtasks;
+    }
+
+    public void setSubtasks(List<SubTask> subtasks) {
+        this.subtasks = subtasks == null ? List.of() : subtasks;
+    }
+
+    public List<StepResult> getStepResults() {
+        return stepResults;
+    }
+
+    public void addStepResult(StepResult result) {
+        stepResults.add(result);
+    }
+
+    /** 规划出的子任务:toolHint 为 get_weather/search/plan 等,执行时按此分派 */
+    public record SubTask(int id, String title, String description, String toolHint) {
+    }
+
+    /** 单步执行结果 */
+    public record StepResult(int id, String title, String output) {
     }
 }

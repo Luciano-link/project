@@ -98,9 +98,9 @@ public class AmapRouteService {
         }
         return geocodes.get(0).path("location").asText().split(",");
     }
-
-    /** 解析公交路径规划结果,取第一套方案拼接摘要 */
-    private String parseTransit(String from, String to, String body) throws IOException {        JsonNode node = objectMapper.readTree(body);
+    /** 解析公交路径规划结果,取第一套方案,输出精细换乘指引(步行+上车站/下车站/途经站数/方向) */
+    private String parseTransit(String from, String to, String body) throws IOException {
+        JsonNode node = objectMapper.readTree(body);
         if (!"1".equals(node.path("status").asText())) {
             throw new IOException("路径规划失败: " + body);
         }
@@ -118,20 +118,57 @@ public class AmapRouteService {
             }
         }
         String distance = first.path("distance").asText("");
-        StringBuilder lines = new StringBuilder();
+
+        StringBuilder guide = new StringBuilder();
         for (JsonNode segment : first.path("segments")) {
+            // 步行段
+            JsonNode walking = segment.path("walking");
+            if (walking.path("distance").asLong(0) > 0) {
+                if (guide.length() > 0) {
+                    guide.append("; ");
+                }
+                guide.append("步行约").append(walking.path("distance").asText()).append("米");
+            }
+            // 公交/地铁路段:线路名 + 方向 + 上车站 + 途经站数 + 下车站
             JsonNode bus = segment.path("bus");
-            if (bus.path("buslines").isArray()) {
-                for (JsonNode line : bus.path("buslines")) {
-                    if (lines.length() > 0) {
-                        lines.append("→");
+            if (bus.path("buslines").isArray() && !bus.path("buslines").isEmpty()) {
+                JsonNode bl = bus.path("buslines").get(0);
+                String name = bl.path("name").asText("");
+                String dep = bl.path("departure_stop").path("name").asText("");
+                String arr = bl.path("arrival_stop").path("name").asText("");
+                int via = bl.path("via_num").asInt(0);
+                String direction = extractDirection(name);
+                if (guide.length() > 0) {
+                    guide.append("; ");
+                }
+                guide.append("乘坐").append(name);
+                if (!direction.isEmpty()) {
+                    guide.append(",开往").append(direction).append("方向");
+                }
+                if (!dep.isEmpty()) {
+                    guide.append(",从").append(dep).append("上车");
+                }
+                if (!arr.isEmpty()) {
+                    guide.append(",到").append(arr).append("下车");
+                    if (via > 0) {
+                        guide.append("(经").append(via).append("个中间站)");
                     }
-                    lines.append(line.path("name").asText(""));
                 }
             }
         }
         return "从" + from + "到" + to + ":约" + duration
-                + ",全程约" + distance + "米"
-                + (lines.length() > 0 ? ",路线:" + lines : "") + "。";
+                + ",全程约" + distance + "米。换乘指引:" + guide;
+    }
+
+    /** 从线路名提取开往方向(线路名形如 "XX路(起--讫)"),返回讫点 */
+    private String extractDirection(String name) {
+        if (name == null) {
+            return "";
+        }
+        int idx = name.lastIndexOf("--");
+        if (idx >= 0 && name.length() > idx + 2) {
+            return name.substring(idx + 2).replace(")", "").replace("(", "").trim();
+        }
+        return "";
     }
 }

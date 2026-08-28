@@ -11,18 +11,25 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 
 /**
- * 极简关键词检索版 RAG。
- * 知识库来自 rag-knowledge.json:每条知识含关键词列表与内容。
- * 用户消息命中任一关键词即返回对应内容,由路由注入 LLM Prompt 增强回答。
- * rag.enabled 为开关,可对比开启/关闭时的回答差异。
+ * 极简关键词检索版 RAG(整合 rose-version 增强机制)。
+ * 知识库来自 rag-knowledge.json。
+ * 支持可选 cities 字段:有城市限定时,仅当用户文本提到该城市才命中,避免串城。
+ * 命中多条时按 priority(高优先)与最长关键词(更具体)排序,返回最多 {@link #MAX_HITS} 条。
  */
 @Component
 public class RagService {
 
     private static final Logger log = LoggerFactory.getLogger(RagService.class);
+
+    /** 单次最多注入的知识条数,避免 Prompt 过长 */
+    private static final int MAX_HITS = 3;
+
+    /** 未配置 priority 时的默认值 */
+    private static final int DEFAULT_PRIORITY = 50;
 
     @Value("${rag.enabled:false}")
     private boolean enabled;
@@ -49,25 +56,91 @@ public class RagService {
         return enabled;
     }
 
-    /** 关键词检索:返回命中的知识内容;未开启或未命中返回 null */
+    /**
+     * 关键词检索:返回命中的知识内容(多条用分隔符拼接);未开启或未命中返回 null。
+     * 带 cities 的条目必须用户文本也提到对应城市才会命中。
+     */
     public String retrieve(String text) {
-        if (!enabled || knowledge.isEmpty()) {
+        if (!enabled || knowledge.isEmpty() || text == null || text.isBlank()) {
             return null;
         }
+        List<ScoredHit> hits = new ArrayList<>();
         for (Knowledge k : knowledge) {
-            for (String keyword : k.keywords) {
-                if (text.contains(keyword)) {
-                    log.info("RAG 命中关键词: {}", keyword);
-                    return k.content;
-                }
+            if (!cityAllowed(text, k)) {
+                continue;
             }
+            int keywordLen = bestMatchingKeywordLength(text, k);
+            if (keywordLen <= 0) {
+                continue;
+            }
+            hits.add(new ScoredHit(k, keywordLen));
         }
-        return null;
+        if (hits.isEmpty()) {
+            return null;
+        }
+        hits.sort(Comparator
+                .comparingInt((ScoredHit h) -> h.knowledge.priorityOrDefault()).reversed()
+                .thenComparingInt(h -> h.keywordLength).reversed());
+        List<String> contents = new ArrayList<>();
+        int count = Math.min(MAX_HITS, hits.size());
+        for (int i = 0; i < count; i++) {
+            ScoredHit hit = hits.get(i);
+            contents.add(hit.knowledge.content);
+            log.info("RAG 命中: priority={}, keywordLen={}, cities={}, sample={}",
+                    hit.knowledge.priorityOrDefault(), hit.keywordLength,
+                    hit.knowledge.cities, sampleKeywords(hit.knowledge));
+        }
+        return String.join("\n---\n", contents);
     }
 
-    /** 知识条目:关键词列表 + 参考内容 */
+    /** 无 cities 或空 = 通用知识;有 cities 则用户文本需包含其中任一城市名 */
+    boolean cityAllowed(String text, Knowledge k) {
+        if (k.cities == null || k.cities.isEmpty()) {
+            return true;
+        }
+        for (String city : k.cities) {
+            if (city != null && !city.isBlank() && text.contains(city)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** 返回命中的最长关键词长度,未命中返回 0 */
+    int bestMatchingKeywordLength(String text, Knowledge k) {
+        if (k.keywords == null) {
+            return 0;
+        }
+        int best = 0;
+        for (String keyword : k.keywords) {
+            if (keyword != null && !keyword.isBlank() && text.contains(keyword)) {
+                best = Math.max(best, keyword.length());
+            }
+        }
+        return best;
+    }
+
+    private String sampleKeywords(Knowledge k) {
+        if (k.keywords == null || k.keywords.isEmpty()) {
+            return "";
+        }
+        return k.keywords.get(0);
+    }
+
+    private record ScoredHit(Knowledge knowledge, int keywordLength) {
+    }
+
+    /** 知识条目:可选城市限定 + 优先级 + 关键词 + 参考内容 */
     public static class Knowledge {
+        /** 可选。非空时仅当用户提到这些城市之一才可命中,用于城市专属攻略 */
+        public List<String> cities;
+        /** 可选。数值越大越优先注入,模板类建议 90+,元信息建议 10 以下 */
+        public Integer priority;
         public List<String> keywords;
         public String content;
+
+        int priorityOrDefault() {
+            return priority == null ? DEFAULT_PRIORITY : priority;
+        }
     }
 }

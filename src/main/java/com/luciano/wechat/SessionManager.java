@@ -235,7 +235,8 @@ public class SessionManager {
                 .retryBaseDelayMs(1000)
                 .retryMaxDelayMs(10000)
                 .heartbeatEnabled(true)
-                .heartbeatIntervalMs(3000)
+                // 消息轮询间隔:调小到 1.5s 降低"发消息到收到"的延迟;过小会增加请求频率
+                .heartbeatIntervalMs(1500)
                 .channelVersion("1.0.0")
                 .build();
     }
